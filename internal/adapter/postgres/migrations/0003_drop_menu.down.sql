@@ -1,0 +1,1 @@
+-- No rollback: the menu now lives in menu-service.

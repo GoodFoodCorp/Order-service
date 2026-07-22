@@ -1,0 +1,29 @@
+run:
+  timeout: 3m
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gofmt
+    - goimports
+    - misspell
+    - gosec
+    - revive
+
+linters-settings:
+  goimports:
+    local-prefixes: goodfood/order-service
+  gosec:
+    excludes:
+      - G404 # non-crypto randomness is fine outside of security contexts
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck

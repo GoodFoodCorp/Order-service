@@ -1,0 +1,45 @@
+services:
+  order-service:
+    build: .
+    container_name: order-service
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    env_file:
+      - .env
+    environment:
+      # Inside the compose network the DB host is the service name below.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@order-db:5432/${POSTGRES_DB}?sslmode=disable
+      PAYMENT_SERVICE_URL: http://payment-service:8086
+    depends_on:
+      order-db:
+        condition: service_healthy
+    networks:
+      - microservices-net
+
+  order-db:
+    image: postgres:17-alpine
+    container_name: order-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5433:5432" # 5433 outside to avoid clashing with other local Postgres
+    volumes:
+      - order_data:/var/lib/postgresql/data
+    networks:
+      - microservices-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+# Shared external network so services can reach each other:
+#   docker network create microservices-net   (once)
+networks:
+  microservices-net:
+    external: true
+
+volumes:
+  order_data:
