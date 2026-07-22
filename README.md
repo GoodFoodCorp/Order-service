@@ -90,6 +90,30 @@ prévue est refusée (`409`) et l'état reste inchangé.
 
 ---
 
+## Dépendances
+
+> **Légende** — 🔴 indispensable (le service ne démarre pas ou ne sert à rien) ·
+> 🟠 nécessaire à une fonctionnalité (le reste continue de marcher) ·
+> 🟡 optionnelle (dégradation silencieuse, journalisée)
+
+| Dépendance | Type | Conséquence si absente |
+|---|---|---|
+| **PostgreSQL** (`order-db`) | 🔴 | Le service ne démarre pas |
+| **payment-service** | 🟠 | **Le paiement est impossible** : `payment-intent` et `confirm` renvoient `502`. Le reste fonctionne : création de commande, consultation, historique, changements de statut par le franchisé. Une commande reste bloquée en `PLACED`. |
+| **auth-service** | 🟠 | Aucun appel réseau, mais toutes les routes exigent un jeton valide |
+
+### Qui dépend de ce service
+
+| Service | Type | Conséquence si `order-service` est arrêté |
+|---|---|---|
+| `web-app` | 🔴 | Commandes et checkout inutilisables |
+| `delivery-service` | 🟡 | La synchronisation des courses échoue (journalisée) ; les livraisons **déjà créées** restent utilisables, mais les changements de statut ne remontent plus aux commandes |
+
+**Sans lien** : `menu-service`, `stock-service`, `reservation-service`,
+`user-service` et `franchise-service` fonctionnent indépendamment.
+
+---
+
 ## Lancement
 
 ```bash
