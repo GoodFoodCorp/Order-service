@@ -1,0 +1,16 @@
+name: CI Docker order-service
+
+on:
+  push:
+    branches:
+      - deploy-automated
+
+jobs:
+  build:
+    uses: GoodFoodCorp/ci-template/.github/workflows/build-deploy.yml@main
+    with:
+      app_name: "order-service"
+    secrets:
+      REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+      REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      ORG_PIPELINE_TOKEN: ${{ secrets.ORG_PIPELINE_TOKEN }}
