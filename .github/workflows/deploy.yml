@@ -3,7 +3,7 @@ name: CI Docker order-service
 on:
   push:
     branches:
-      - deploy-automated
+      - develop
 
 jobs:
   build:
