@@ -1,19 +1,3 @@
-package http
-
-import (
-	"context"
-	"net/http"
-	"time"
-
-	"github.com/go-chi/chi/v5"
-	chimw "github.com/go-chi/chi/v5/middleware"
-	"github.com/rs/zerolog"
-)
-
-// HealthChecker lets the router expose readiness without knowing about pgx.
-type HealthChecker func(ctx context.Context) error
-
-// NewRouter assembles middlewares and routes.
 func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
 	r := chi.NewRouter()
 
@@ -21,7 +5,41 @@ func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCh
 	r.Use(RequestID)
 	r.Use(Logger(log))
 
-	// Liveness / readiness (K8s probes)
+	// Sondes directes K8s (si tes probes kubelet tapent /healthz ou /readyz en interne)
+	registerHealthRoutes(r, dbCheck)
+
+	r.Route("/api/orders", func(r chi.Router) {
+		// Health checks accessibles aussi via Ingress
+		registerHealthRoutes(r, dbCheck)
+
+		// Documentation publique
+		r.Get("/docs/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/yaml")
+			_, _ = w.Write(openAPISpec)
+		})
+		r.Get("/docs", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write(scalarHTML)
+		})
+
+		// Routes protégées par JWT
+		r.Group(func(r chi.Router) {
+			r.Use(Auth(jwtSecret))
+
+			r.Post("/", handler.Create)
+			r.Get("/", handler.List)
+			r.Get("/ready-for-delivery", handler.ListReadyForDelivery)
+			r.Get("/{id}", handler.GetByID)
+			r.Post("/{id}/payment-intent", handler.CreatePaymentIntent)
+			r.Post("/{id}/confirm", handler.Confirm)
+			r.Patch("/{id}/status", handler.UpdateStatus)
+		})
+	})
+
+	return r
+}
+
+func registerHealthRoutes(r chi.Router, dbCheck HealthChecker) {
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
@@ -34,28 +52,4 @@ func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCh
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
-
-	// OpenAPI spec + Scalar UI
-	r.Get("/docs/openapi.yaml", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/yaml")
-		_, _ = w.Write(openAPISpec)
-	})
-	r.Get("/docs", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write(scalarHTML)
-	})
-
-	r.Route("/api/orders", func(r chi.Router) {
-		r.Use(Auth(jwtSecret))
-		r.Post("/", handler.Create)
-		r.Get("/", handler.List)
-		// Registered before /{id} so "ready-for-delivery" is not captured as an id.
-		r.Get("/ready-for-delivery", handler.ListReadyForDelivery)
-		r.Get("/{id}", handler.GetByID)
-		r.Post("/{id}/payment-intent", handler.CreatePaymentIntent)
-		r.Post("/{id}/confirm", handler.Confirm)
-		r.Patch("/{id}/status", handler.UpdateStatus)
-	})
-
-	return r
 }
