@@ -13,7 +13,7 @@ var scalarHTML = []byte(`<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1">
   </head>
   <body>
-    <script id="api-reference" data-url="/docs/openapi.yaml"
+    <script id="api-reference" data-url="/api/orders/docs/openapi.yaml"
       src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.25.130/dist/browser/standalone.min.js"
       integrity="sha384-oyL8y2b0EvVxYsvg2qNlT8xHcsvmySaljIklWvbATuTrccZSyvWnsPnmOunYQL2R"
       crossorigin="anonymous"></script>

@@ -7,7 +7,8 @@ info:
     (Authorization: Bearer or auth_token cookie).
   version: 0.1.0
 servers:
-  - url: http://localhost:8082
+  - url: /
+    description: Current host
 tags:
   - name: Orders
   - name: Payments
@@ -31,11 +32,16 @@ components:
       type: object
       required: [restaurant_id, delivery_address, items]
       properties:
-        restaurant_id: { type: string, format: uuid, description: Tenant id of the restaurant }
+        restaurant_id:
+          {
+            type: string,
+            format: uuid,
+            description: Tenant id of the restaurant,
+          }
         delivery_address: { type: string }
         items:
           type: array
-          items: { $ref: '#/components/schemas/OrderItemInput' }
+          items: { $ref: "#/components/schemas/OrderItemInput" }
     Order:
       type: object
       properties:
@@ -44,14 +50,24 @@ components:
         restaurant_id: { type: string, format: uuid }
         status:
           type: string
-          enum: [PLACED, PAYMENT_PENDING, CONFIRMED, IN_PREPARATION, READY_FOR_PICKUP, IN_DELIVERY, DELIVERED, CANCELLED]
+          enum:
+            [
+              PLACED,
+              PAYMENT_PENDING,
+              CONFIRMED,
+              IN_PREPARATION,
+              READY_FOR_PICKUP,
+              IN_DELIVERY,
+              DELIVERED,
+              CANCELLED,
+            ]
         total_amount_cents: { type: integer }
         delivery_address: { type: string }
         items:
           type: array
           items:
             allOf:
-              - $ref: '#/components/schemas/OrderItemInput'
+              - $ref: "#/components/schemas/OrderItemInput"
               - type: object
                 properties:
                   id: { type: string, format: uuid }
@@ -80,15 +96,23 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/CreateOrderRequest' }
+            schema: { $ref: "#/components/schemas/CreateOrderRequest" }
       responses:
-        '201':
+        "201":
           description: Order created (status PLACED)
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/Order' }
-        '400': { description: Validation error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
-        '403': { description: Not a customer }
+              schema: { $ref: "#/components/schemas/Order" }
+        "400":
+          {
+            description: Validation error,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+        "403": { description: Not a customer }
     get:
       tags: [Orders]
       summary: List customer order history (own orders; admin may pass any customerId)
@@ -97,60 +121,98 @@ paths:
           name: customerId
           schema: { type: string, format: uuid }
       responses:
-        '200':
+        "200":
           description: Orders, newest first
           content:
             application/json:
-              schema: { type: array, items: { $ref: '#/components/schemas/Order' } }
+              schema:
+                { type: array, items: { $ref: "#/components/schemas/Order" } }
   /api/orders/ready-for-delivery:
     get:
       tags: [Orders]
       summary: Orders awaiting a courier (roles livreur/admin; polled by delivery-service)
       responses:
-        '200':
+        "200":
           description: READY_FOR_PICKUP orders, oldest first
           content:
             application/json:
-              schema: { type: array, items: { $ref: '#/components/schemas/Order' } }
+              schema:
+                { type: array, items: { $ref: "#/components/schemas/Order" } }
   /api/orders/{id}:
     get:
       tags: [Orders]
       summary: Order detail (owner, restaurant manager, courier or admin)
       parameters:
-        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+        - {
+            in: path,
+            name: id,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       responses:
-        '200': { description: Order, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
-        '403': { description: Forbidden }
-        '404': { description: Not found }
+        "200":
+          {
+            description: Order,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Order" } },
+              },
+          }
+        "403": { description: Forbidden }
+        "404": { description: Not found }
   /api/orders/{id}/payment-intent:
     post:
       tags: [Payments]
       summary: Create a Stripe PaymentIntent (test mode) for the order total
       parameters:
-        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+        - {
+            in: path,
+            name: id,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       responses:
-        '201':
+        "201":
           description: Intent created (idempotent while pending); order moves to PAYMENT_PENDING
           content:
             application/json:
-              schema: { $ref: '#/components/schemas/PaymentIntent' }
-        '409': { description: Order not awaiting payment }
+              schema: { $ref: "#/components/schemas/PaymentIntent" }
+        "409": { description: Order not awaiting payment }
   /api/orders/{id}/confirm:
     post:
       tags: [Payments]
       summary: Confirm the order once the payment intent succeeded
       description: In production this is triggered by a Stripe webhook; direct call in test mode.
       parameters:
-        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+        - {
+            in: path,
+            name: id,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       responses:
-        '200': { description: Order confirmed, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
-        '502': { description: Payment not completed }
+        "200":
+          {
+            description: Order confirmed,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Order" } },
+              },
+          }
+        "502": { description: Payment not completed }
   /api/orders/{id}/status:
     patch:
       tags: [Orders]
       summary: Update order status (manager/admin; couriers limited to IN_DELIVERY and DELIVERED)
       parameters:
-        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+        - {
+            in: path,
+            name: id,
+            required: true,
+            schema: { type: string, format: uuid },
+          }
       requestBody:
         required: true
         content:
@@ -161,5 +223,13 @@ paths:
               properties:
                 status: { type: string, example: READY_FOR_PICKUP }
       responses:
-        '200': { description: Updated order, content: { application/json: { schema: { $ref: '#/components/schemas/Order' } } } }
-        '409': { description: Invalid lifecycle transition }
+        "200":
+          {
+            description: Updated order,
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Order" } },
+              },
+          }
+        "409": { description: Invalid lifecycle transition }
