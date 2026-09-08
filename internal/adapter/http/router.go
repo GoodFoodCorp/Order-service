@@ -1,3 +1,19 @@
+package http
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/rs/zerolog"
+)
+
+// HealthChecker lets the router expose readiness without knowing about pgx.
+type HealthChecker func(ctx context.Context) error
+
+// NewRouter assembles middlewares and routes.
 func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
 	r := chi.NewRouter()
 
