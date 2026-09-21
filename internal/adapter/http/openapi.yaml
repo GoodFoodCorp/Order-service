@@ -133,7 +133,11 @@ paths:
       summary: Orders awaiting a courier (roles livreur/admin; polled by delivery-service)
       responses:
         "200":
-          description: READY_FOR_PICKUP orders, oldest first
+          description: >-
+            Claimable orders (IN_PREPARATION or READY_FOR_PICKUP), oldest
+            first. Orders still being prepared are included so a courier can
+            claim one and travel to the restaurant while it is cooked; the
+            order only moves to IN_DELIVERY when it is actually picked up.
           content:
             application/json:
               schema:

@@ -80,10 +80,14 @@ func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID str
 		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
 }
 
-func (r *OrderRepository) ListByStatus(ctx context.Context, status domain.OrderStatus) ([]domain.Order, error) {
+func (r *OrderRepository) ListByStatuses(ctx context.Context, statuses ...domain.OrderStatus) ([]domain.Order, error) {
+	raw := make([]string, len(statuses))
+	for i, s := range statuses {
+		raw[i] = string(s)
+	}
 	return r.list(ctx,
 		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at
-		 FROM orders WHERE status = $1 ORDER BY placed_at ASC`, string(status))
+		 FROM orders WHERE status = ANY($1) ORDER BY placed_at ASC`, raw)
 }
 
 func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order) error {

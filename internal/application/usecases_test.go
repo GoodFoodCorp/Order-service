@@ -56,11 +56,14 @@ func (f *fakeOrderRepo) ListByRestaurant(_ context.Context, restaurantID string)
 	return out, nil
 }
 
-func (f *fakeOrderRepo) ListByStatus(_ context.Context, status domain.OrderStatus) ([]domain.Order, error) {
+func (f *fakeOrderRepo) ListByStatuses(_ context.Context, statuses ...domain.OrderStatus) ([]domain.Order, error) {
 	out := []domain.Order{}
 	for _, o := range f.orders {
-		if o.Status == status {
-			out = append(out, *o)
+		for _, s := range statuses {
+			if o.Status == s {
+				out = append(out, *o)
+				break
+			}
 		}
 	}
 	return out, nil
@@ -425,4 +428,37 @@ func TestListReadyForDelivery(t *testing.T) {
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
+}
+
+// A courier can claim an order that is still cooking, so the travel time to
+// the restaurant overlaps with preparation.
+func TestListReadyForDeliveryIncludesOrdersStillInPreparation(t *testing.T) {
+	uc, orders, _ := setup()
+	order := confirmOrder(t, uc)
+	stored := orders.orders[order.ID]
+	stored.Status = domain.StatusInPreparation
+
+	list, err := uc.ListReadyForDelivery(context.Background(), courier)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, domain.StatusInPreparation, list[0].Status)
+}
+
+// Orders that are not claimable yet (or no longer) must stay out of the list.
+func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
+	uc, orders, _ := setup()
+	order := confirmOrder(t, uc)
+	stored := orders.orders[order.ID]
+
+	for _, s := range []domain.OrderStatus{
+		domain.StatusConfirmed,
+		domain.StatusInDelivery,
+		domain.StatusDelivered,
+		domain.StatusCancelled,
+	} {
+		stored.Status = s
+		list, err := uc.ListReadyForDelivery(context.Background(), courier)
+		require.NoError(t, err)
+		assert.Empty(t, list, "status %s must not be claimable", s)
+	}
 }

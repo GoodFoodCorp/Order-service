@@ -8,7 +8,7 @@ type OrderRepository interface {
 	GetByID(ctx context.Context, id string) (*Order, error)
 	ListByCustomer(ctx context.Context, customerID string) ([]Order, error)
 	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
-	ListByStatus(ctx context.Context, status OrderStatus) ([]Order, error)
+	ListByStatuses(ctx context.Context, statuses ...OrderStatus) ([]Order, error)
 	UpdateStatus(ctx context.Context, order *Order) error
 }
 
