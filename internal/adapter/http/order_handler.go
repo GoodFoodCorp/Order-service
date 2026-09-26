@@ -41,6 +41,7 @@ func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		RestaurantID:    req.RestaurantID,
 		DeliveryAddress: req.DeliveryAddress,
 		Items:           items,
+		PromoCode:       req.PromoCode,
 	})
 	if err != nil {
 		writeDomainError(w, r, err)

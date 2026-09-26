@@ -26,10 +26,11 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		order.ID, order.CustomerID, order.RestaurantID, order.Status,
-		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt)
+		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt,
+		order.PromoCode, order.DiscountCents)
 	if err != nil {
 		return err
 	}
@@ -49,10 +50,10 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
 		 FROM orders WHERE id = $1`, id).
 		Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt)
+			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.NewNotFoundError("order not found")
 	}
@@ -70,19 +71,19 @@ func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order
 
 func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
 		 FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC`, customerID)
 }
 
 func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
 		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
 }
 
 func (r *OrderRepository) ListByStatus(ctx context.Context, status domain.OrderStatus) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
 		 FROM orders WHERE status = $1 ORDER BY placed_at ASC`, string(status))
 }
 
@@ -110,7 +111,8 @@ func (r *OrderRepository) list(ctx context.Context, query string, arg any) ([]do
 	for rows.Next() {
 		var o domain.Order
 		if err := rows.Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status,
-			&o.TotalAmountCents, &o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt); err != nil {
+			&o.TotalAmountCents, &o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt,
+			&o.PromoCode, &o.DiscountCents); err != nil {
 			return nil, err
 		}
 		orders = append(orders, o)
