@@ -13,6 +13,7 @@ import (
 	httpadapter "goodfood/order-service/internal/adapter/http"
 	"goodfood/order-service/internal/adapter/paymentclient"
 	"goodfood/order-service/internal/adapter/postgres"
+	"goodfood/order-service/internal/adapter/promoclient"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
 )
@@ -42,8 +43,10 @@ func main() {
 	uc := application.NewUseCases(
 		postgres.NewOrderRepository(pool),
 		paymentclient.New(cfg.PaymentServiceURL),
+		promoclient.New(cfg.PromoServiceURL),
 	)
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
+	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
 
 	router := httpadapter.NewRouter(
 		httpadapter.NewOrderHandler(uc),

@@ -1,0 +1,2 @@
+ALTER TABLE orders ADD COLUMN promo_code TEXT;
+ALTER TABLE orders ADD COLUMN discount_cents BIGINT NOT NULL DEFAULT 0;

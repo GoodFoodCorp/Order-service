@@ -35,8 +35,9 @@ const (
 type UseCases struct {
 	orders   domain.OrderRepository
 	payments domain.PaymentService
+	promos   domain.PromoService
 }
 
-func NewUseCases(orders domain.OrderRepository, payments domain.PaymentService) *UseCases {
-	return &UseCases{orders: orders, payments: payments}
+func NewUseCases(orders domain.OrderRepository, payments domain.PaymentService, promos domain.PromoService) *UseCases {
+	return &UseCases{orders: orders, payments: payments, promos: promos}
 }
