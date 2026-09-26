@@ -60,6 +60,8 @@ type Order struct {
 	Items            []OrderItem
 	PlacedAt         time.Time
 	ConfirmedAt      *time.Time
+	PromoCode        *string
+	DiscountCents    int64
 }
 
 type NewOrderItemInput struct {
@@ -149,3 +151,19 @@ func (o *Order) TransitionTo(target OrderStatus) error {
 
 // IsOwnedBy reports whether the given user placed this order.
 func (o *Order) IsOwnedBy(userID string) bool { return o.CustomerID == userID }
+
+// AmountDueCents is what actually gets charged: the item subtotal minus any
+// promo discount. TotalAmountCents itself always stays the pre-discount
+// subtotal so a code's history stays traceable on the order.
+func (o *Order) AmountDueCents() int64 { return o.TotalAmountCents - o.DiscountCents }
+
+// ApplyPromo records a discount already validated by promo-service. The code
+// itself is never re-validated here — promo-service is the source of truth.
+func (o *Order) ApplyPromo(code string, discountCents int64) error {
+	if discountCents < 0 || discountCents > o.TotalAmountCents {
+		return NewValidationError("invalid discount for this order")
+	}
+	o.PromoCode = &code
+	o.DiscountCents = discountCents
+	return nil
+}
