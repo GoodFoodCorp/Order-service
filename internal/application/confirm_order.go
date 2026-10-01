@@ -30,6 +30,14 @@ func (uc *UseCases) ConfirmOrder(ctx context.Context, actor Actor, orderID strin
 		return nil, domain.NewPaymentError("payment not completed (status: " + status + ")")
 	}
 
+	// The promo code is only consumed for real once the payment actually
+	// succeeded — a customer who abandons checkout never burns a redemption.
+	if order.PromoCode != nil {
+		if _, err := uc.promos.Redeem(ctx, actor.Token, *order.PromoCode, order.ID, order.TotalAmountCents); err != nil {
+			return nil, domain.NewPaymentError(err.Error())
+		}
+	}
+
 	if err := order.TransitionTo(domain.StatusConfirmed); err != nil {
 		return nil, err
 	}

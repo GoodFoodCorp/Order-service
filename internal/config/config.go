@@ -10,6 +10,7 @@ type Config struct {
 	DatabaseURL       string
 	JWTSecret         string
 	PaymentServiceURL string
+	PromoServiceURL   string
 	LogLevel          string
 }
 
@@ -21,6 +22,7 @@ func Load() (*Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		JWTSecret:         os.Getenv("JWT_SECRET"),
 		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
+		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 	}
 	if cfg.DatabaseURL == "" {
