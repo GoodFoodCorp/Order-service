@@ -8,6 +8,7 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/rabbitmq/amqp091-go v1.15.0
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 )

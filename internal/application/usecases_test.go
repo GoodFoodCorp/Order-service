@@ -153,7 +153,7 @@ func setup() (*UseCases, *fakeOrderRepo, *fakePayments, *fakePromos) {
 	orders := newFakeOrderRepo()
 	payments := newFakePayments()
 	promos := newFakePromos()
-	return NewUseCases(orders, payments, promos), orders, payments, promos
+	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}), orders, payments, promos
 }
 
 func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
@@ -527,4 +527,59 @@ func TestListReadyForDelivery(t *testing.T) {
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
+}
+
+// ── EventPublisher ──────────────────────────────────────────
+
+type fakePublisher struct {
+	events []domain.OrderReadyEvent
+	err    error
+}
+
+func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReadyEvent) error {
+	f.events = append(f.events, e)
+	return f.err
+}
+
+func setupWithPublisher(pub domain.EventPublisher) *UseCases {
+	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub)
+}
+
+func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
+	pub := &fakePublisher{}
+	uc := setupWithPublisher(pub)
+	order := confirmOrder(t, uc)
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+	require.NoError(t, err)
+	assert.Empty(t, pub.events, "no event before READY_FOR_PICKUP")
+
+	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+	require.NoError(t, err)
+	require.Len(t, pub.events, 1)
+	got := pub.events[0]
+	assert.Equal(t, order.ID, got.OrderID)
+	assert.Equal(t, order.CustomerID, got.CustomerID)
+	assert.Equal(t, order.RestaurantID, got.RestaurantID)
+	assert.Equal(t, order.DeliveryAddress, got.DeliveryAddress)
+	assert.NotEmpty(t, got.EventID)
+	assert.False(t, got.OccurredAt.IsZero())
+
+	_, err = uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
+	require.NoError(t, err)
+	assert.Len(t, pub.events, 1, "no event for later transitions")
+}
+
+func TestUpdateOrderStatusSucceedsWhenPublishFails(t *testing.T) {
+	pub := &fakePublisher{err: errors.New("broker down")}
+	uc := setupWithPublisher(pub)
+	order := confirmOrder(t, uc)
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+	require.NoError(t, err)
+
+	updated, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusReadyForPickup, updated.Status)
+	assert.Len(t, pub.events, 1)
 }

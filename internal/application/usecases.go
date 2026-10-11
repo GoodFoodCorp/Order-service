@@ -36,8 +36,12 @@ type UseCases struct {
 	orders   domain.OrderRepository
 	payments domain.PaymentService
 	promos   domain.PromoService
+	events   domain.EventPublisher
 }
 
-func NewUseCases(orders domain.OrderRepository, payments domain.PaymentService, promos domain.PromoService) *UseCases {
-	return &UseCases{orders: orders, payments: payments, promos: promos}
+func NewUseCases(orders domain.OrderRepository, payments domain.PaymentService, promos domain.PromoService, events domain.EventPublisher) *UseCases {
+	if events == nil {
+		events = domain.NoopPublisher{}
+	}
+	return &UseCases{orders: orders, payments: payments, promos: promos, events: events}
 }

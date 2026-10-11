@@ -11,11 +11,13 @@ import (
 	"github.com/rs/zerolog"
 
 	httpadapter "goodfood/order-service/internal/adapter/http"
+	"goodfood/order-service/internal/adapter/messaging"
 	"goodfood/order-service/internal/adapter/paymentclient"
 	"goodfood/order-service/internal/adapter/postgres"
 	"goodfood/order-service/internal/adapter/promoclient"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
+	"goodfood/order-service/internal/domain"
 )
 
 func main() {
@@ -40,10 +42,21 @@ func main() {
 	}
 	log.Info().Msg("migrations applied")
 
+	var events domain.EventPublisher = domain.NoopPublisher{}
+	if cfg.RabbitMQURL != "" {
+		publisher := messaging.NewAMQPPublisher(cfg.RabbitMQURL)
+		defer publisher.Close()
+		events = publisher
+		log.Info().Msg("order events published to rabbitmq")
+	} else {
+		log.Warn().Msg("RABBITMQ_URL not set: order events are not published")
+	}
+
 	uc := application.NewUseCases(
 		postgres.NewOrderRepository(pool),
 		paymentclient.New(cfg.PaymentServiceURL),
 		promoclient.New(cfg.PromoServiceURL),
+		events,
 	)
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")

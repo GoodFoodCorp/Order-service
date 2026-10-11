@@ -12,6 +12,7 @@ type Config struct {
 	PaymentServiceURL string
 	PromoServiceURL   string
 	LogLevel          string
+	RabbitMQURL       string
 }
 
 // Load reads the typed configuration from environment variables only
@@ -24,6 +25,7 @@ func Load() (*Config, error) {
 		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
 		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
+		RabbitMQURL:       os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
