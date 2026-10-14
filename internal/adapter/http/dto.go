@@ -23,6 +23,7 @@ type createOrderRequest struct {
 	RestaurantID    string                   `json:"restaurant_id"`
 	DeliveryAddress string                   `json:"delivery_address"`
 	Items           []createOrderItemRequest `json:"items"`
+	PromoCode       string                   `json:"promo_code"`
 }
 
 type updateStatusRequest struct {
@@ -46,6 +47,9 @@ type orderResponse struct {
 	RestaurantID     string              `json:"restaurant_id"`
 	Status           string              `json:"status"`
 	TotalAmountCents int64               `json:"total_amount_cents"`
+	DiscountCents    int64               `json:"discount_cents,omitempty"`
+	AmountDueCents   int64               `json:"amount_due_cents"`
+	PromoCode        *string             `json:"promo_code,omitempty"`
 	DeliveryAddress  string              `json:"delivery_address"`
 	Items            []orderItemResponse `json:"items"`
 	PlacedAt         time.Time           `json:"placed_at"`
@@ -82,6 +86,9 @@ func toOrderResponse(o *domain.Order) orderResponse {
 		RestaurantID:     o.RestaurantID,
 		Status:           string(o.Status),
 		TotalAmountCents: o.TotalAmountCents,
+		DiscountCents:    o.DiscountCents,
+		AmountDueCents:   o.AmountDueCents(),
+		PromoCode:        o.PromoCode,
 		DeliveryAddress:  o.DeliveryAddress,
 		Items:            items,
 		PlacedAt:         o.PlacedAt,

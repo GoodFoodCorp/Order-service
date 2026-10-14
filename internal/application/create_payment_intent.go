@@ -28,7 +28,7 @@ func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderI
 	}
 
 	const currency = "eur"
-	intent, err := uc.payments.CreateIntent(ctx, actor.Token, order.ID, order.TotalAmountCents, currency)
+	intent, err := uc.payments.CreateIntent(ctx, actor.Token, order.ID, order.AmountDueCents(), currency)
 	if err != nil {
 		return nil, domain.NewPaymentError(err.Error())
 	}
@@ -45,7 +45,7 @@ func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderI
 	return &PaymentIntentOutput{
 		IntentID:     intent.ID,
 		ClientSecret: intent.ClientSecret,
-		AmountCents:  order.TotalAmountCents,
+		AmountCents:  order.AmountDueCents(),
 		Currency:     currency,
 	}, nil
 }

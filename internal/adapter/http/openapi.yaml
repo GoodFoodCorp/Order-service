@@ -42,6 +42,7 @@ components:
         items:
           type: array
           items: { $ref: "#/components/schemas/OrderItemInput" }
+        promo_code: { type: string, description: Optional network-wide promo code, validated against promo-service }
     Order:
       type: object
       properties:
@@ -61,7 +62,10 @@ components:
               DELIVERED,
               CANCELLED,
             ]
-        total_amount_cents: { type: integer }
+        total_amount_cents: { type: integer, description: Item subtotal, never discounted }
+        discount_cents: { type: integer, description: Discount from promo_code, if any }
+        amount_due_cents: { type: integer, description: What is actually charged (total_amount_cents - discount_cents) }
+        promo_code: { type: string, nullable: true }
         delivery_address: { type: string }
         items:
           type: array

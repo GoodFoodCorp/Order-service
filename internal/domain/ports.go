@@ -29,3 +29,21 @@ type PaymentService interface {
 	CreateIntent(ctx context.Context, token, orderID string, amountCents int64, currency string) (*PaymentIntent, error)
 	Confirm(ctx context.Context, token, orderID string) (string, error)
 }
+
+// PromoPreview is what promo-service returns for a code that is currently
+// eligible for the given order amount.
+type PromoPreview struct {
+	Code          string
+	DiscountCents int64
+}
+
+// PromoService is the outbound port to promo-service, which owns promo codes
+// and their redemptions. The caller's JWT is forwarded on every call.
+type PromoService interface {
+	// Preview validates a code without consuming it — safe to call repeatedly
+	// while the customer is still assembling their order.
+	Preview(ctx context.Context, token, code string, orderAmountCents int64) (*PromoPreview, error)
+	// Redeem atomically consumes one usage of the code for this order.
+	// Idempotent per orderID: retries never double-consume.
+	Redeem(ctx context.Context, token, code, orderID string, orderAmountCents int64) (int64, error)
+}

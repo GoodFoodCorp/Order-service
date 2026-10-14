@@ -109,6 +109,39 @@ func (f *fakePayments) Confirm(_ context.Context, _, orderID string) (string, er
 	return f.status, nil
 }
 
+// fakePromos stands in for promo-service.
+type fakePromos struct {
+	codes        map[string]int // code -> percent off
+	redeemCalls  int
+	redeemedFor  map[string]bool // orderID already redeemed
+	previewError error
+}
+
+func newFakePromos() *fakePromos {
+	return &fakePromos{codes: map[string]int{}, redeemedFor: map[string]bool{}}
+}
+
+func (f *fakePromos) Preview(_ context.Context, _, code string, orderAmountCents int64) (*domain.PromoPreview, error) {
+	if f.previewError != nil {
+		return nil, f.previewError
+	}
+	percent, ok := f.codes[code]
+	if !ok {
+		return nil, errors.New("promo code not found")
+	}
+	return &domain.PromoPreview{Code: code, DiscountCents: orderAmountCents * int64(percent) / 100}, nil
+}
+
+func (f *fakePromos) Redeem(_ context.Context, _, code, orderID string, orderAmountCents int64) (int64, error) {
+	f.redeemCalls++
+	percent, ok := f.codes[code]
+	if !ok {
+		return 0, errors.New("promo code not found")
+	}
+	f.redeemedFor[orderID] = true
+	return orderAmountCents * int64(percent) / 100, nil
+}
+
 // ── Test fixtures ───────────────────────────────────────────
 
 var (
@@ -119,10 +152,11 @@ var (
 	courier   = Actor{UserID: "liv-1", RoleSlugs: []string{RoleCourier}}
 )
 
-func setup() (*UseCases, *fakeOrderRepo, *fakePayments) {
+func setup() (*UseCases, *fakeOrderRepo, *fakePayments, *fakePromos) {
 	orders := newFakeOrderRepo()
 	payments := newFakePayments()
-	return NewUseCases(orders, payments), orders, payments
+	promos := newFakePromos()
+	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}), orders, payments, promos
 }
 
 func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
@@ -141,7 +175,7 @@ func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
 // ── PlaceOrder ──────────────────────────────────────────────
 
 func TestPlaceOrder(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 
 	order := placeTestOrder(t, uc)
 	assert.Equal(t, domain.StatusPlaced, order.Status)
@@ -151,7 +185,7 @@ func TestPlaceOrder(t *testing.T) {
 }
 
 func TestPlaceOrderRequiresCustomerRole(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 
 	for _, actor := range []Actor{manager, courier, {UserID: "x"}} {
 		_, err := uc.PlaceOrder(context.Background(), actor, PlaceOrderInput{})
@@ -161,10 +195,47 @@ func TestPlaceOrderRequiresCustomerRole(t *testing.T) {
 	}
 }
 
+func TestPlaceOrderWithPromoCode(t *testing.T) {
+	uc, _, _, promos := setup()
+	promos.codes["WELCOME10"] = 10
+
+	order, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{
+		RestaurantID:    "resto-1",
+		DeliveryAddress: "12 rue de Paris",
+		Items: []domain.NewOrderItemInput{
+			{MenuItemID: "m1", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299},
+		},
+		PromoCode: "WELCOME10",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(2598), order.TotalAmountCents, "the subtotal itself is never discounted")
+	assert.Equal(t, int64(259), order.DiscountCents)
+	assert.Equal(t, int64(2339), order.AmountDueCents())
+	require.NotNil(t, order.PromoCode)
+	assert.Equal(t, "WELCOME10", *order.PromoCode)
+	assert.Equal(t, 0, promos.redeemCalls, "placing an order only previews — it never consumes a redemption")
+}
+
+func TestPlaceOrderRejectsUnknownPromoCode(t *testing.T) {
+	uc, _, _, _ := setup()
+
+	_, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{
+		RestaurantID:    "resto-1",
+		DeliveryAddress: "12 rue de Paris",
+		Items: []domain.NewOrderItemInput{
+			{MenuItemID: "m1", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299},
+		},
+		PromoCode: "NOPE",
+	})
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+}
+
 // ── GetOrder ────────────────────────────────────────────────
 
 func TestGetOrderAccessRules(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := placeTestOrder(t, uc)
 
 	tests := []struct {
@@ -192,7 +263,7 @@ func TestGetOrderAccessRules(t *testing.T) {
 }
 
 func TestGetOrderNotFound(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	_, err := uc.GetOrder(context.Background(), customer, "missing")
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
@@ -202,7 +273,7 @@ func TestGetOrderNotFound(t *testing.T) {
 // ── ListCustomerOrders ──────────────────────────────────────
 
 func TestListCustomerOrders(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	placeTestOrder(t, uc)
 
 	own, err := uc.ListCustomerOrders(context.Background(), customer, "")
@@ -222,7 +293,7 @@ func TestListCustomerOrders(t *testing.T) {
 // ── ListRestaurantOrders ────────────────────────────────────
 
 func TestListRestaurantOrders(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	placeTestOrder(t, uc)
 
 	// The restaurant's manager sees its orders...
@@ -245,7 +316,7 @@ func TestListRestaurantOrders(t *testing.T) {
 // ── CreatePaymentIntent ─────────────────────────────────────
 
 func TestCreatePaymentIntentFlow(t *testing.T) {
-	uc, orders, payments := setup()
+	uc, orders, payments, _ := setup()
 	order := placeTestOrder(t, uc)
 
 	res, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
@@ -265,7 +336,7 @@ func TestCreatePaymentIntentFlow(t *testing.T) {
 }
 
 func TestCreatePaymentIntentOnlyOwner(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := placeTestOrder(t, uc)
 
 	_, err := uc.CreatePaymentIntent(context.Background(), otherCust, order.ID)
@@ -275,7 +346,7 @@ func TestCreatePaymentIntentOnlyOwner(t *testing.T) {
 }
 
 func TestCreatePaymentIntentWrongState(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 	order := placeTestOrder(t, uc)
 	// Force the order into a post-payment state.
 	stored := orders.orders[order.ID]
@@ -290,7 +361,7 @@ func TestCreatePaymentIntentWrongState(t *testing.T) {
 // ── ConfirmOrder ────────────────────────────────────────────
 
 func TestConfirmOrderSuccess(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 	order := placeTestOrder(t, uc)
 	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
 	require.NoError(t, err)
@@ -309,8 +380,39 @@ func TestConfirmOrderSuccess(t *testing.T) {
 	assert.Equal(t, domain.StatusConfirmed, again.Status)
 }
 
+func TestConfirmOrderRedeemsPromoOnlyOnce(t *testing.T) {
+	uc, _, _, promos := setup()
+	promos.codes["WELCOME10"] = 10
+
+	order, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{
+		RestaurantID:    "resto-1",
+		DeliveryAddress: "12 rue de Paris",
+		Items: []domain.NewOrderItemInput{
+			{MenuItemID: "m1", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299},
+		},
+		PromoCode: "WELCOME10",
+	})
+	require.NoError(t, err)
+
+	intent, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	assert.Equal(t, order.AmountDueCents(), intent.AmountCents, "payment-service is charged the discounted amount")
+
+	confirmed, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusConfirmed, confirmed.Status)
+	assert.Equal(t, 1, promos.redeemCalls)
+	assert.True(t, promos.redeemedFor[order.ID])
+
+	// Confirming again is a no-op on an already-confirmed order — the
+	// redemption is not attempted a second time.
+	_, err = uc.ConfirmOrder(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, promos.redeemCalls)
+}
+
 func TestConfirmOrderPaymentNotCompleted(t *testing.T) {
-	uc, _, payments := setup()
+	uc, _, payments, _ := setup()
 	order := placeTestOrder(t, uc)
 	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
 	require.NoError(t, err)
@@ -323,7 +425,7 @@ func TestConfirmOrderPaymentNotCompleted(t *testing.T) {
 }
 
 func TestConfirmOrderWithoutIntent(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := placeTestOrder(t, uc)
 
 	_, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
@@ -346,7 +448,7 @@ func confirmOrder(t *testing.T, uc *UseCases) *domain.Order {
 }
 
 func TestUpdateOrderStatusByManager(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	updated, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
@@ -359,7 +461,7 @@ func TestUpdateOrderStatusByManager(t *testing.T) {
 }
 
 func TestUpdateOrderStatusManagerWrongTenant(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	wrongManager := Actor{UserID: "mgr-2", TenantID: "resto-99", RoleSlugs: []string{RoleManager}}
@@ -370,7 +472,7 @@ func TestUpdateOrderStatusManagerWrongTenant(t *testing.T) {
 }
 
 func TestUpdateOrderStatusCourierLimits(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	// Couriers cannot do back-office transitions...
@@ -393,7 +495,7 @@ func TestUpdateOrderStatusCourierLimits(t *testing.T) {
 }
 
 func TestUpdateOrderStatusInvalidTransition(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusDelivered)
@@ -403,7 +505,7 @@ func TestUpdateOrderStatusInvalidTransition(t *testing.T) {
 }
 
 func TestUpdateOrderStatusCustomerForbidden(t *testing.T) {
-	uc, _, _ := setup()
+	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	_, err := uc.UpdateOrderStatus(context.Background(), customer, order.ID, domain.StatusInPreparation)
@@ -415,7 +517,7 @@ func TestUpdateOrderStatusCustomerForbidden(t *testing.T) {
 // ── ListReadyForDelivery ────────────────────────────────────
 
 func TestListReadyForDelivery(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusReadyForPickup
@@ -433,7 +535,7 @@ func TestListReadyForDelivery(t *testing.T) {
 // A courier can claim an order that is still cooking, so the travel time to
 // the restaurant overlaps with preparation.
 func TestListReadyForDeliveryIncludesOrdersStillInPreparation(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusInPreparation
@@ -446,7 +548,7 @@ func TestListReadyForDeliveryIncludesOrdersStillInPreparation(t *testing.T) {
 
 // Orders that are not claimable yet (or no longer) must stay out of the list.
 func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
-	uc, orders, _ := setup()
+	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 	stored := orders.orders[order.ID]
 
@@ -461,4 +563,59 @@ func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, list, "status %s must not be claimable", s)
 	}
+}
+
+// ── EventPublisher ──────────────────────────────────────────
+
+type fakePublisher struct {
+	events []domain.OrderReadyEvent
+	err    error
+}
+
+func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReadyEvent) error {
+	f.events = append(f.events, e)
+	return f.err
+}
+
+func setupWithPublisher(pub domain.EventPublisher) *UseCases {
+	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub)
+}
+
+func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
+	pub := &fakePublisher{}
+	uc := setupWithPublisher(pub)
+	order := confirmOrder(t, uc)
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+	require.NoError(t, err)
+	assert.Empty(t, pub.events, "no event before READY_FOR_PICKUP")
+
+	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+	require.NoError(t, err)
+	require.Len(t, pub.events, 1)
+	got := pub.events[0]
+	assert.Equal(t, order.ID, got.OrderID)
+	assert.Equal(t, order.CustomerID, got.CustomerID)
+	assert.Equal(t, order.RestaurantID, got.RestaurantID)
+	assert.Equal(t, order.DeliveryAddress, got.DeliveryAddress)
+	assert.NotEmpty(t, got.EventID)
+	assert.False(t, got.OccurredAt.IsZero())
+
+	_, err = uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
+	require.NoError(t, err)
+	assert.Len(t, pub.events, 1, "no event for later transitions")
+}
+
+func TestUpdateOrderStatusSucceedsWhenPublishFails(t *testing.T) {
+	pub := &fakePublisher{err: errors.New("broker down")}
+	uc := setupWithPublisher(pub)
+	order := confirmOrder(t, uc)
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+	require.NoError(t, err)
+
+	updated, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusReadyForPickup, updated.Status)
+	assert.Len(t, pub.events, 1)
 }

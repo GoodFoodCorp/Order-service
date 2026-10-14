@@ -11,6 +11,9 @@ services:
       # Inside the compose network the DB host is the service name below.
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@order-db:5432/${POSTGRES_DB}?sslmode=disable
       PAYMENT_SERVICE_URL: http://payment-service:8086
+      PROMO_SERVICE_URL: http://promo-service:8092
+      # Broker du compose du Delivery-service (réseau partagé microservices-net)
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
     depends_on:
       order-db:
         condition: service_healthy

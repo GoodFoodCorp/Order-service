@@ -32,7 +32,8 @@ internal/
 ├── adapter/
 │   ├── http/              # Routeur chi, middlewares (JWT, request-id, logs), DTO
 │   ├── postgres/          # Repository pgx + migrations SQL embarquées
-│   └── paymentclient/     # Client REST vers payment-service (JWT transmis)
+│   ├── paymentclient/     # Client REST vers payment-service (JWT transmis)
+│   └── promoclient/       # Client REST vers promo-service (JWT transmis)
 └── config/                # Configuration typée depuis l'environnement
 ```
 
@@ -45,6 +46,10 @@ sont la **source de vérité unique** du domaine.
 
 - **Passer une commande** (panier → commande) — montants stockés en **centimes**,
   jamais en flottants
+- **Code promo optionnel** — prévisualisé (jamais consommé) auprès de
+  `promo-service` à la création, puis **réellement consommé** seulement après
+  succès du paiement (dans `confirm`), pour ne jamais brûler une utilisation
+  sur un panier abandonné
 - **Consulter une commande** : le client propriétaire, le franchisé du restaurant,
   le livreur ou le siège
 - **Historique des commandes** d'un client
@@ -100,6 +105,7 @@ prévue est refusée (`409`) et l'état reste inchangé.
 |---|---|---|
 | **PostgreSQL** (`order-db`) | 🔴 | Le service ne démarre pas |
 | **payment-service** | 🟠 | **Le paiement est impossible** : `payment-intent` et `confirm` renvoient `502`. Le reste fonctionne : création de commande, consultation, historique, changements de statut par le franchisé. Une commande reste bloquée en `PLACED`. |
+| **promo-service** | 🟡 | Un `promo_code` envoyé à la création est refusé (`400`) ; une commande sans code fonctionne normalement. Aucun impact sur les commandes déjà passées. |
 | **auth-service** | 🟠 | Aucun appel réseau, mais toutes les routes exigent un jeton valide |
 
 ### Qui dépend de ce service
@@ -123,7 +129,8 @@ docker compose up -d --build
 ```
 
 ⚠️ `JWT_SECRET` doit être **identique** à celui de `auth-service`.
-`payment-service` doit tourner pour que le paiement fonctionne.
+`payment-service` doit tourner pour que le paiement fonctionne ; `promo-service`
+uniquement si un code promo est utilisé.
 
 ### Variables d'environnement
 
@@ -134,6 +141,7 @@ docker compose up -d --build
 | `DATABASE_URL` | oui | Chaîne pgx (le compose la construit pour le conteneur) |
 | `JWT_SECRET` | oui | Secret HS256 partagé avec `auth-service` |
 | `PAYMENT_SERVICE_URL` | non | Défaut `http://payment-service:8086` |
+| `PROMO_SERVICE_URL` | non | Défaut `http://promo-service:8092` |
 | `LOG_LEVEL` | non (info) | `debug`, `info`, `warn`, `error` |
 
 ---
