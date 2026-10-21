@@ -54,15 +54,7 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 // checkStock refuses the order when a tracked ingredient is short. Dishes
 // without a recipe are not tracked; if none is, stock-service is not called.
 func (uc *UseCases) checkStock(ctx context.Context, order *domain.Order) error {
-	seen := map[string]bool{}
-	menuItemIDs := make([]string, 0, len(order.Items))
-	for _, item := range order.Items {
-		if !seen[item.MenuItemID] {
-			seen[item.MenuItemID] = true
-			menuItemIDs = append(menuItemIDs, item.MenuItemID)
-		}
-	}
-	recipes, err := uc.recipes.Lookup(ctx, order.RestaurantID, menuItemIDs)
+	recipes, err := uc.recipes.Lookup(ctx, order.RestaurantID, distinctMenuItemIDs(order))
 	if err != nil {
 		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("recipe lookup failed")
 		return domain.NewUnavailableError(stockUnavailableMessage)
@@ -80,4 +72,17 @@ func (uc *UseCases) checkStock(ctx context.Context, order *domain.Order) error {
 		return domain.NewOutOfStockError(domain.ShortageMessage(order.Items, recipes, availability.Missing))
 	}
 	return nil
+}
+
+// distinctMenuItemIDs lists the order's dishes once each, in order.
+func distinctMenuItemIDs(order *domain.Order) []string {
+	seen := map[string]bool{}
+	ids := make([]string, 0, len(order.Items))
+	for _, item := range order.Items {
+		if !seen[item.MenuItemID] {
+			seen[item.MenuItemID] = true
+			ids = append(ids, item.MenuItemID)
+		}
+	}
+	return ids
 }

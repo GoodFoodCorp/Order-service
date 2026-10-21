@@ -40,11 +40,15 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 		return nil, domain.NewForbiddenError("you are not allowed to update order status")
 	}
 
+	previous := order.Status
 	if err := order.TransitionTo(target); err != nil {
 		return nil, err
 	}
 	if err := uc.orders.UpdateStatus(ctx, order); err != nil {
 		return nil, err
+	}
+	if target == domain.StatusCancelled && stockRestorableStatuses[previous] {
+		uc.restoreStock(ctx, order)
 	}
 	if target == domain.StatusReadyForPickup {
 		uc.publishOrderReady(ctx, order)

@@ -10,6 +10,11 @@ type OrderRepository interface {
 	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
 	ListByStatus(ctx context.Context, status OrderStatus) ([]Order, error)
 	UpdateStatus(ctx context.Context, order *Order) error
+	// UpdateStockSync persists only the stock synchronisation state.
+	UpdateStockSync(ctx context.Context, orderID string, state StockSyncState) error
+	// ListByStockSync returns at most limit orders in one of the given states,
+	// oldest first (used by the retry worker).
+	ListByStockSync(ctx context.Context, states []StockSyncState, limit int) ([]Order, error)
 }
 
 // PaymentIntent is what payment-service returns when an intent is created.

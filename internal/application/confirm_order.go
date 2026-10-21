@@ -44,5 +44,6 @@ func (uc *UseCases) ConfirmOrder(ctx context.Context, actor Actor, orderID strin
 	if err := uc.orders.UpdateStatus(ctx, order); err != nil {
 		return nil, err
 	}
+	uc.consumeStock(ctx, order)
 	return order, nil
 }

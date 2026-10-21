@@ -26,11 +26,11 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		order.ID, order.CustomerID, order.RestaurantID, order.Status,
 		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt,
-		order.PromoCode, order.DiscountCents)
+		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync))
 	if err != nil {
 		return err
 	}
@@ -50,10 +50,10 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE id = $1`, id).
 		Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents)
+			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.NewNotFoundError("order not found")
 	}
@@ -71,19 +71,19 @@ func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order
 
 func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC`, customerID)
 }
 
 func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
 }
 
 func (r *OrderRepository) ListByStatus(ctx context.Context, status domain.OrderStatus) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE status = $1 ORDER BY placed_at ASC`, string(status))
 }
 
@@ -100,8 +100,37 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order)
 	return nil
 }
 
-func (r *OrderRepository) list(ctx context.Context, query string, arg any) ([]domain.Order, error) {
-	rows, err := r.pool.Query(ctx, query, arg)
+func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, state domain.StockSyncState) error {
+	tag, err := r.pool.Exec(ctx, `UPDATE orders SET stock_sync = $1 WHERE id = $2`, string(state), orderID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return domain.NewNotFoundError("order not found")
+	}
+	return nil
+}
+
+func (r *OrderRepository) ListByStockSync(ctx context.Context, states []domain.StockSyncState, limit int) ([]domain.Order, error) {
+	values := make([]string, len(states))
+	for i, s := range states {
+		values[i] = string(s)
+	}
+	return r.list(ctx,
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		 FROM orders WHERE stock_sync = ANY($1) ORDER BY placed_at ASC LIMIT $2`, values, limit)
+}
+
+// stockSyncOrNone defaults an unset state to NONE (the column is NOT NULL).
+func stockSyncOrNone(s domain.StockSyncState) domain.StockSyncState {
+	if s == "" {
+		return domain.StockSyncNone
+	}
+	return s
+}
+
+func (r *OrderRepository) list(ctx context.Context, query string, args ...any) ([]domain.Order, error) {
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +141,7 @@ func (r *OrderRepository) list(ctx context.Context, query string, arg any) ([]do
 		var o domain.Order
 		if err := rows.Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status,
 			&o.TotalAmountCents, &o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt,
-			&o.PromoCode, &o.DiscountCents); err != nil {
+			&o.PromoCode, &o.DiscountCents, &o.StockSync); err != nil {
 			return nil, err
 		}
 		orders = append(orders, o)
