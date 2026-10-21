@@ -100,8 +100,10 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order)
 	return nil
 }
 
-func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, state domain.StockSyncState) error {
-	tag, err := r.pool.Exec(ctx, `UPDATE orders SET stock_sync = $1 WHERE id = $2`, string(state), orderID)
+func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState) error {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3 WHERE id = $4`,
+		order.Status, order.ConfirmedAt, string(stockSync), order.ID)
 	if err != nil {
 		return err
 	}
@@ -109,6 +111,32 @@ func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, s
 		return domain.NewNotFoundError("order not found")
 	}
 	return nil
+}
+
+func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order, restorable bool) (domain.StockSyncState, error) {
+	var state domain.StockSyncState
+	err := r.pool.QueryRow(ctx,
+		`UPDATE orders SET status = $1, confirmed_at = $2,
+		   stock_sync = CASE WHEN $3::boolean AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING' ELSE stock_sync END
+		 WHERE id = $4 RETURNING stock_sync`,
+		order.Status, order.ConfirmedAt, restorable, order.ID).Scan(&state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", domain.NewNotFoundError("order not found")
+	}
+	if err != nil {
+		return "", err
+	}
+	return state, nil
+}
+
+func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, from, to domain.StockSyncState) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET stock_sync = $3 WHERE id = $1 AND stock_sync = $2`,
+		orderID, string(from), string(to))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func (r *OrderRepository) ListByStockSync(ctx context.Context, states []domain.StockSyncState, limit int) ([]domain.Order, error) {

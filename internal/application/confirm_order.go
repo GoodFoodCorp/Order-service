@@ -41,9 +41,15 @@ func (uc *UseCases) ConfirmOrder(ctx context.Context, actor Actor, orderID strin
 	if err := order.TransitionTo(domain.StatusConfirmed); err != nil {
 		return nil, err
 	}
-	if err := uc.orders.UpdateStatus(ctx, order); err != nil {
+	// Payment succeeded: persist the confirmation and the pending consumption
+	// in one write, detached from the request so a client disconnect cannot
+	// leave a paid order unconfirmed or untracked.
+	persistCtx, cancel := detached(ctx)
+	defer cancel()
+	if err := uc.orders.ConfirmWithStockSync(persistCtx, order, domain.StockSyncConsumePending); err != nil {
 		return nil, err
 	}
+	order.StockSync = domain.StockSyncConsumePending
 	uc.consumeStock(ctx, order)
 	return order, nil
 }

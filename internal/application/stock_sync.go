@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"time"
 
 	zlog "github.com/rs/zerolog/log"
 
@@ -16,52 +17,73 @@ var stockRestorableStatuses = map[domain.OrderStatus]bool{
 	domain.StatusReadyForPickup: true,
 }
 
-// setStockSync updates the in-memory order and persists the state. A failure
-// to persist is only logged: the order status is already committed and the
-// error text never reaches a caller.
-func (uc *UseCases) setStockSync(ctx context.Context, order *domain.Order, state domain.StockSyncState) {
-	order.StockSync = state
-	if err := uc.orders.UpdateStockSync(ctx, order.ID, state); err != nil {
-		zlog.Error().Err(err).Str("order_id", order.ID).Str("stock_sync", string(state)).Msg("could not persist stock sync state")
+// stockSyncTimeout bounds the detached stock work (lookup, call, state write).
+const stockSyncTimeout = 30 * time.Second
+
+// detached returns a context that survives the request being cancelled (a
+// client disconnect after payment must not abort stock work), bounded by a
+// timeout.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), stockSyncTimeout)
+}
+
+// moveStockSync is a compare-and-set of the persisted state. The in-memory
+// order only follows when the write was applied; a lost race or a failed
+// write is logged and leaves the persisted state for the retry worker.
+func (uc *UseCases) moveStockSync(ctx context.Context, order *domain.Order, from, to domain.StockSyncState) {
+	applied, err := uc.orders.UpdateStockSync(ctx, order.ID, from, to)
+	switch {
+	case err != nil:
+		zlog.Error().Err(err).Str("order_id", order.ID).Str("from", string(from)).Str("to", string(to)).Msg("could not persist stock sync state")
+	case !applied:
+		zlog.Info().Str("order_id", order.ID).Str("from", string(from)).Str("to", string(to)).Msg("stock sync state changed concurrently, write skipped")
+	default:
+		order.StockSync = to
 	}
 }
 
-// consumeStock decrements the stock once the order is paid and CONFIRMED.
-// It is best-effort: on failure the order stays CONFIRMED and is flagged
-// CONSUME_PENDING so the retry worker can replay it (Consume is idempotent
-// per order id on stock-service's side).
+// consumeStock decrements the stock once the order is paid and CONFIRMED
+// (stock_sync is CONSUME_PENDING, written with the confirmation). It moves
+// CONSUME_PENDING to CONSUMED, or to NONE when no dish is tracked. Any failure
+// leaves CONSUME_PENDING for the retry worker (Consume is idempotent per order
+// id on stock-service's side). Best-effort and detached from request
+// cancellation.
 func (uc *UseCases) consumeStock(ctx context.Context, order *domain.Order) {
+	ctx, cancel := detached(ctx)
+	defer cancel()
+
 	recipes, err := uc.recipes.Lookup(ctx, order.RestaurantID, distinctMenuItemIDs(order))
 	if err != nil {
 		zlog.Warn().Err(err).Str("order_id", order.ID).Msg("recipe lookup failed, stock consumption deferred")
-		uc.setStockSync(ctx, order, domain.StockSyncConsumePending)
 		return
 	}
 	needs := domain.RequiredIngredients(order.Items, recipes)
 	if len(needs) == 0 {
-		uc.setStockSync(ctx, order, domain.StockSyncNone)
+		uc.moveStockSync(ctx, order, domain.StockSyncConsumePending, domain.StockSyncNone)
 		return
 	}
 	if err := uc.stock.Consume(ctx, order.ID, order.RestaurantID, needs); err != nil {
 		zlog.Warn().Err(err).Str("order_id", order.ID).Msg("stock consumption failed, deferred")
-		uc.setStockSync(ctx, order, domain.StockSyncConsumePending)
 		return
 	}
-	uc.setStockSync(ctx, order, domain.StockSyncConsumed)
+	uc.moveStockSync(ctx, order, domain.StockSyncConsumePending, domain.StockSyncConsumed)
 }
 
-// restoreStock puts the ingredients back after a cancellation. It only acts
-// when stock may have been consumed: CONSUMED, or CONSUME_PENDING (the call
-// still goes out so stock-service records a tombstone that makes a delayed
-// consume a no-op). Best-effort: failure leaves RESTORE_PENDING for the worker.
+// restoreStock puts the ingredients back after a cancellation that left the
+// order in RESTORE_PENDING (set atomically by CancelWithStockSync, including
+// when a consume was still pending: stock-service then records a tombstone
+// that makes the delayed consume a no-op). On success RESTORE_PENDING moves to
+// RESTORED; on failure it stays for the worker.
 func (uc *UseCases) restoreStock(ctx context.Context, order *domain.Order) {
-	if order.StockSync != domain.StockSyncConsumed && order.StockSync != domain.StockSyncConsumePending {
+	if order.StockSync != domain.StockSyncRestorePending {
 		return
 	}
+	ctx, cancel := detached(ctx)
+	defer cancel()
+
 	if err := uc.stock.Restore(ctx, order.ID, order.RestaurantID); err != nil {
 		zlog.Warn().Err(err).Str("order_id", order.ID).Msg("stock restoration failed, deferred")
-		uc.setStockSync(ctx, order, domain.StockSyncRestorePending)
 		return
 	}
-	uc.setStockSync(ctx, order, domain.StockSyncRestored)
+	uc.moveStockSync(ctx, order, domain.StockSyncRestorePending, domain.StockSyncRestored)
 }

@@ -44,11 +44,15 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 	if err := order.TransitionTo(target); err != nil {
 		return nil, err
 	}
-	if err := uc.orders.UpdateStatus(ctx, order); err != nil {
-		return nil, err
-	}
-	if target == domain.StatusCancelled && stockRestorableStatuses[previous] {
+	if target == domain.StatusCancelled {
+		state, err := uc.orders.CancelWithStockSync(ctx, order, stockRestorableStatuses[previous])
+		if err != nil {
+			return nil, err
+		}
+		order.StockSync = state
 		uc.restoreStock(ctx, order)
+	} else if err := uc.orders.UpdateStatus(ctx, order); err != nil {
+		return nil, err
 	}
 	if target == domain.StatusReadyForPickup {
 		uc.publishOrderReady(ctx, order)

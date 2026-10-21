@@ -10,8 +10,17 @@ type OrderRepository interface {
 	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
 	ListByStatus(ctx context.Context, status OrderStatus) ([]Order, error)
 	UpdateStatus(ctx context.Context, order *Order) error
-	// UpdateStockSync persists only the stock synchronisation state.
-	UpdateStockSync(ctx context.Context, orderID string, state StockSyncState) error
+	// ConfirmWithStockSync writes the CONFIRMED status, confirmed_at and the
+	// stock_sync intent in one UPDATE, so a paid order is never left without
+	// a pending consumption.
+	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState) error
+	// CancelWithStockSync cancels the order and, when restorable (the order was
+	// paid), atomically moves CONSUMED / CONSUME_PENDING to RESTORE_PENDING.
+	// It returns the resulting stock_sync state.
+	CancelWithStockSync(ctx context.Context, order *Order, restorable bool) (StockSyncState, error)
+	// UpdateStockSync is a compare-and-set: stock_sync moves from -> to only if
+	// it currently equals from. applied=false (lost race) is not an error.
+	UpdateStockSync(ctx context.Context, orderID string, from, to StockSyncState) (applied bool, err error)
 	// ListByStockSync returns at most limit orders in one of the given states,
 	// oldest first (used by the retry worker).
 	ListByStockSync(ctx context.Context, states []StockSyncState, limit int) ([]Order, error)

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,17 +16,26 @@ import (
 
 type fakeOrderRepo struct {
 	orders map[string]*domain.Order
+	seq    map[string]int // insertion order, for deterministic listing
 	// stockSyncErr makes UpdateStockSync fail (the state is then not persisted).
 	stockSyncErr error
+	// confirmWrites records each ConfirmWithStockSync call (one atomic write).
+	confirmWrites []confirmWrite
+}
+
+type confirmWrite struct {
+	status    domain.OrderStatus
+	stockSync domain.StockSyncState
 }
 
 func newFakeOrderRepo() *fakeOrderRepo {
-	return &fakeOrderRepo{orders: map[string]*domain.Order{}}
+	return &fakeOrderRepo{orders: map[string]*domain.Order{}, seq: map[string]int{}}
 }
 
 func (f *fakeOrderRepo) Create(_ context.Context, o *domain.Order) error {
 	cp := *o
 	f.orders[o.ID] = &cp
+	f.seq[o.ID] = len(f.seq)
 	return nil
 }
 
@@ -78,27 +88,63 @@ func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order) error {
 	return nil
 }
 
-func (f *fakeOrderRepo) UpdateStockSync(_ context.Context, orderID string, state domain.StockSyncState) error {
-	if f.stockSyncErr != nil {
-		return f.stockSyncErr
-	}
-	stored, ok := f.orders[orderID]
+func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order, state domain.StockSyncState) error {
+	stored, ok := f.orders[o.ID]
 	if !ok {
 		return domain.NewNotFoundError("order not found")
 	}
+	stored.Status = o.Status
+	stored.ConfirmedAt = o.ConfirmedAt
 	stored.StockSync = state
+	f.confirmWrites = append(f.confirmWrites, confirmWrite{o.Status, state})
 	return nil
 }
 
+func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order, restorable bool) (domain.StockSyncState, error) {
+	stored, ok := f.orders[o.ID]
+	if !ok {
+		return "", domain.NewNotFoundError("order not found")
+	}
+	stored.Status = o.Status
+	stored.ConfirmedAt = o.ConfirmedAt
+	if restorable && (stored.StockSync == domain.StockSyncConsumed || stored.StockSync == domain.StockSyncConsumePending) {
+		stored.StockSync = domain.StockSyncRestorePending
+	}
+	return stored.StockSync, nil
+}
+
+func (f *fakeOrderRepo) UpdateStockSync(_ context.Context, orderID string, from, to domain.StockSyncState) (bool, error) {
+	if f.stockSyncErr != nil {
+		return false, f.stockSyncErr
+	}
+	stored, ok := f.orders[orderID]
+	if !ok {
+		return false, domain.NewNotFoundError("order not found")
+	}
+	if stored.StockSync != from {
+		return false, nil
+	}
+	stored.StockSync = to
+	return true, nil
+}
+
 func (f *fakeOrderRepo) ListByStockSync(_ context.Context, states []domain.StockSyncState, limit int) ([]domain.Order, error) {
-	out := []domain.Order{}
+	matching := []*domain.Order{}
 	for _, o := range f.orders {
 		for _, s := range states {
-			if o.StockSync == s && (limit <= 0 || len(out) < limit) {
-				out = append(out, *o)
+			if o.StockSync == s {
+				matching = append(matching, o)
 				break
 			}
 		}
+	}
+	sort.Slice(matching, func(i, j int) bool { return f.seq[matching[i].ID] < f.seq[matching[j].ID] })
+	out := []domain.Order{}
+	for _, o := range matching {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		out = append(out, *o)
 	}
 	return out, nil
 }
@@ -204,6 +250,8 @@ type fakeStock struct {
 	restoreCalls int
 	consumed     []consumeCall
 	restored     []restoreCall
+	// ctxErrs holds ctx.Err() observed at each Consume/Restore call.
+	ctxErrs []error
 }
 
 type consumeCall struct {
@@ -231,14 +279,16 @@ func (f *fakeStock) Check(_ context.Context, restaurantID string, lines []domain
 	return f.availability, nil
 }
 
-func (f *fakeStock) Consume(_ context.Context, orderID, restaurantID string, lines []domain.StockLine) error {
+func (f *fakeStock) Consume(ctx context.Context, orderID, restaurantID string, lines []domain.StockLine) error {
 	f.consumeCalls++
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	f.consumed = append(f.consumed, consumeCall{orderID, restaurantID, lines})
 	return f.consumeErr
 }
 
-func (f *fakeStock) Restore(_ context.Context, orderID, restaurantID string) error {
+func (f *fakeStock) Restore(ctx context.Context, orderID, restaurantID string) error {
 	f.restoreCalls++
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 	f.restored = append(f.restored, restoreCall{orderID, restaurantID})
 	return f.restoreErr
 }
@@ -883,6 +933,8 @@ func TestConfirmOrderKeepsOrderConfirmedAndMarksConsumePendingWhenStockDown(t *t
 	assert.Equal(t, domain.StatusConfirmed, stored.Status)
 	assert.Equal(t, domain.StockSyncConsumePending, stored.StockSync)
 	assert.Equal(t, 1, stock.consumeCalls)
+	assert.Equal(t, []confirmWrite{{domain.StatusConfirmed, domain.StockSyncConsumePending}}, orders.confirmWrites,
+		"status and the pending intent are written in one call")
 }
 
 func TestConfirmOrderMarksConsumePendingWhenRecipeLookupFails(t *testing.T) {
@@ -926,8 +978,8 @@ func TestConfirmOrderAlreadyConfirmedDoesNotConsumeAgain(t *testing.T) {
 	assert.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, order.ID))
 }
 
-func TestConfirmOrderStaysConfirmedWhenPersistingStockSyncFails(t *testing.T) {
-	uc, orders, _, recipes, _ := setupStock()
+func TestConfirmOrderKeepsConsumePendingWhenConsumedWriteFails(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
 	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
 	order := placeStockOrder(t, uc, burger(1))
 	orders.stockSyncErr = errors.New("db down")
@@ -935,8 +987,59 @@ func TestConfirmOrderStaysConfirmedWhenPersistingStockSyncFails(t *testing.T) {
 	confirmed := payAndConfirm(t, uc, order.ID)
 
 	assert.Equal(t, domain.StatusConfirmed, confirmed.Status)
-	assert.Equal(t, domain.StockSyncConsumed, confirmed.StockSync, "in-memory state reflects what was attempted")
-	assert.Equal(t, domain.StockSyncNone, storedSync(t, orders, order.ID), "nothing persisted")
+	assert.Equal(t, 1, stock.consumeCalls)
+	assert.Equal(t, domain.StockSyncConsumePending, confirmed.StockSync, "in-memory state follows what was persisted")
+	assert.Equal(t, domain.StockSyncConsumePending, storedSync(t, orders, order.ID), "replay-safe: the worker will retry the idempotent consume")
+}
+
+func TestConsumeStockLostCASDoesNotOverwriteConcurrentCancel(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	order := placeStockOrder(t, uc, burger(1))
+	orders.orders[order.ID].StockSync = domain.StockSyncRestorePending // a cancel won the race
+	snapshot, _ := orders.GetByID(context.Background(), order.ID)
+	snapshot.StockSync = domain.StockSyncConsumePending // stale view held by the confirming request
+
+	uc.consumeStock(context.Background(), snapshot)
+
+	assert.Equal(t, 1, stock.consumeCalls)
+	assert.Equal(t, domain.StockSyncRestorePending, storedSync(t, orders, order.ID))
+	assert.Equal(t, domain.StockSyncConsumePending, snapshot.StockSync, "in-memory state not advanced on a lost CAS")
+}
+
+func TestConsumeStockRunsOnDetachedContext(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	order := placeStockOrder(t, uc, burger(1))
+	orders.orders[order.ID].StockSync = domain.StockSyncConsumePending
+	snapshot, _ := orders.GetByID(context.Background(), order.ID)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	uc.consumeStock(ctx, snapshot)
+
+	require.Len(t, stock.ctxErrs, 1)
+	assert.NoError(t, stock.ctxErrs[0], "the Consume call must not see the cancelled request context")
+	assert.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, order.ID))
+}
+
+func TestListByStockSyncIsOldestFirst(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	stock.consumeErr = errors.New("down")
+	var ids []string
+	for i := 0; i < 3; i++ {
+		o := placeStockOrder(t, uc, burger(1))
+		payAndConfirm(t, uc, o.ID)
+		ids = append(ids, o.ID)
+	}
+
+	got, err := orders.ListByStockSync(context.Background(), []domain.StockSyncState{domain.StockSyncConsumePending}, 2)
+
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, ids[0], got[0].ID)
+	assert.Equal(t, ids[1], got[1].ID)
 }
 
 func TestCancelFromPaidStatusRestoresStock(t *testing.T) {
@@ -1054,4 +1157,20 @@ func TestNonCancelTransitionNeverRestores(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.Equal(t, 0, stock.restoreCalls)
+}
+
+func TestCancelKeepsRestorePendingWhenRestoredWriteFails(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	order := placeStockOrder(t, uc, burger(1))
+	payAndConfirm(t, uc, order.ID)
+	require.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, order.ID))
+	orders.stockSyncErr = errors.New("db down")
+
+	cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, stock.restoreCalls)
+	assert.Equal(t, domain.StockSyncRestorePending, cancelled.StockSync)
+	assert.Equal(t, domain.StockSyncRestorePending, storedSync(t, orders, order.ID), "restore is idempotent, the worker replays it")
 }
