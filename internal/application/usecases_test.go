@@ -321,6 +321,7 @@ func TestPlaceOrderRefusesWhenIngredientMissing(t *testing.T) {
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeOutOfStock, derr.Code)
 	assert.Equal(t, "Stock insuffisant pour « Burger » : Steak (besoin 2 kg, disponible 1)", derr.Message)
+	assert.Equal(t, []domain.StockLine{{StockItemID: "steak", Quantity: 2}}, stock.checkedLines)
 	assert.Empty(t, orders.orders, "nothing is created when stock is short")
 }
 
@@ -376,7 +377,7 @@ func TestPlaceOrderMixedRecipeAndUntrackedDishChecksOnlyTrackedIngredients(t *te
 func TestPlaceOrderRefusesWithUnavailableWhenRecipeLookupFails(t *testing.T) {
 	uc, orders, promos, recipes, stock := setupStock()
 	promos.codes["WELCOME10"] = 10
-	recipes.err = errors.New("menu down")
+	recipes.err = errors.New("http://menu-service:8082 returned 500")
 	in := stockOrderInput(burger(1))
 	in.PromoCode = "WELCOME10"
 
@@ -385,6 +386,8 @@ func TestPlaceOrderRefusesWithUnavailableWhenRecipeLookupFails(t *testing.T) {
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeUnavailable, derr.Code)
+	assert.Equal(t, "Service momentanément indisponible, veuillez réessayer dans quelques instants.", derr.Message)
+	assert.NotContains(t, err.Error(), "returned 500")
 	assert.Empty(t, orders.orders)
 	assert.Equal(t, 0, stock.checkCalls)
 }
@@ -392,13 +395,15 @@ func TestPlaceOrderRefusesWithUnavailableWhenRecipeLookupFails(t *testing.T) {
 func TestPlaceOrderRefusesWithUnavailableWhenStockCheckFails(t *testing.T) {
 	uc, orders, _, recipes, stock := setupStock()
 	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
-	stock.checkErr = errors.New("stock down")
+	stock.checkErr = errors.New("http://stock-service:8083 returned 500")
 
 	_, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(burger(1)))
 
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeUnavailable, derr.Code)
+	assert.Equal(t, "Service momentanément indisponible, veuillez réessayer dans quelques instants.", derr.Message)
+	assert.NotContains(t, err.Error(), "returned 500")
 	assert.Empty(t, orders.orders)
 }
 

@@ -3,8 +3,14 @@ package application
 import (
 	"context"
 
+	zlog "github.com/rs/zerolog/log"
+
 	"goodfood/order-service/internal/domain"
 )
+
+// stockUnavailableMessage is customer-facing: the underlying cause is logged,
+// never returned.
+const stockUnavailableMessage = "Service momentanément indisponible, veuillez réessayer dans quelques instants."
 
 type PlaceOrderInput struct {
 	RestaurantID    string
@@ -58,7 +64,8 @@ func (uc *UseCases) checkStock(ctx context.Context, order *domain.Order) error {
 	}
 	recipes, err := uc.recipes.Lookup(ctx, order.RestaurantID, menuItemIDs)
 	if err != nil {
-		return domain.NewUnavailableError("recipe lookup failed: " + err.Error())
+		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("recipe lookup failed")
+		return domain.NewUnavailableError(stockUnavailableMessage)
 	}
 	needs := domain.RequiredIngredients(order.Items, recipes)
 	if len(needs) == 0 {
@@ -66,7 +73,8 @@ func (uc *UseCases) checkStock(ctx context.Context, order *domain.Order) error {
 	}
 	availability, err := uc.stock.Check(ctx, order.RestaurantID, needs)
 	if err != nil {
-		return domain.NewUnavailableError("stock check failed: " + err.Error())
+		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("stock check failed")
+		return domain.NewUnavailableError(stockUnavailableMessage)
 	}
 	if !availability.Available {
 		return domain.NewOutOfStockError(domain.ShortageMessage(order.Items, recipes, availability.Missing))
