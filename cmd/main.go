@@ -4,7 +4,9 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,6 +22,16 @@ import (
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
 	"goodfood/order-service/internal/domain"
+)
+
+const (
+	// stockRetryInterval is the period of the stock synchronisation retry worker.
+	stockRetryInterval = 30 * time.Second
+	// stockRetryFirstDelay lets the first pass run shortly after startup so
+	// orders left pending by a crash are picked up quickly.
+	stockRetryFirstDelay = 10 * time.Second
+	// stockRetryBatch is the maximum number of orders handled per pass.
+	stockRetryBatch = 50
 )
 
 func main() {
@@ -73,14 +85,40 @@ func main() {
 		func(ctx context.Context) error { return pool.Ping(ctx) },
 	)
 
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go runStockRetry(runCtx, log, uc)
+
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Info().Str("port", cfg.Port).Msg("order-service started")
+	go func() {
+		<-runCtx.Done()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelShutdown()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("server stopped")
+	}
+}
+
+// runStockRetry replays pending stock synchronisation until ctx ends.
+func runStockRetry(ctx context.Context, log zerolog.Logger, uc *application.UseCases) {
+	timer := time.NewTimer(stockRetryFirstDelay)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			n := uc.RetryStockSync(ctx, stockRetryBatch)
+			log.Debug().Int("processed", n).Msg("stock sync retry pass done")
+			timer.Reset(stockRetryInterval)
+		}
 	}
 }
 
