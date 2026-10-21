@@ -87,46 +87,85 @@ func (r *OrderRepository) ListByStatus(ctx context.Context, status domain.OrderS
 		 FROM orders WHERE status = $1 ORDER BY placed_at ASC`, string(status))
 }
 
-func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order) error {
+// errConcurrentChange is returned when a guarded status write found the order
+// in another status than the one the use case read.
+func errConcurrentChange() error {
+	return domain.NewConflictError("order changed concurrently, retry")
+}
+
+func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order, from domain.OrderStatus) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3`,
-		order.Status, order.ConfirmedAt, order.ID)
+		`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3 AND status = $4`,
+		order.Status, order.ConfirmedAt, order.ID, from)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewNotFoundError("order not found")
+	if tag.RowsAffected() > 0 {
+		return nil
 	}
-	return nil
+	current, err := r.currentStatus(ctx, order.ID)
+	if err != nil {
+		return err
+	}
+	if current == order.Status {
+		return nil // a concurrent identical update already applied it
+	}
+	return errConcurrentChange()
 }
 
-func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState) error {
+func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState) (bool, error) {
+	// Guarded on PAYMENT_PENDING, the only legal predecessor of CONFIRMED: a
+	// late duplicate confirmation can never reset a cancelled (and restored)
+	// order to CONFIRMED|CONSUME_PENDING.
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3 WHERE id = $4`,
+		`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3
+		 WHERE id = $4 AND status = 'PAYMENT_PENDING'`,
 		order.Status, order.ConfirmedAt, string(stockSync), order.ID)
 	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order) error {
+	// Restorability is computed from the row itself, not from the status the
+	// use case read: in an UPDATE, the SET expressions see the pre-update row
+	// (re-evaluated on the latest version under concurrent writes), so a
+	// confirmation that committed after the read is still restored. The WHERE
+	// keeps the lifecycle rule (only these statuses may be cancelled).
+	var state domain.StockSyncState
+	err := r.pool.QueryRow(ctx,
+		`UPDATE orders SET status = 'CANCELLED',
+		   stock_sync = CASE
+		     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+		      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
+		     ELSE stock_sync END
+		 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+		 RETURNING stock_sync, confirmed_at`,
+		order.ID).Scan(&state, &order.ConfirmedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err := r.currentStatus(ctx, order.ID); err != nil {
+			return err
+		}
+		return errConcurrentChange()
+	}
+	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewNotFoundError("order not found")
-	}
+	order.Status = domain.StatusCancelled
+	order.StockSync = state
 	return nil
 }
 
-func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order, restorable bool) (domain.StockSyncState, error) {
-	var state domain.StockSyncState
-	err := r.pool.QueryRow(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2,
-		   stock_sync = CASE WHEN $3::boolean AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING' ELSE stock_sync END
-		 WHERE id = $4 RETURNING stock_sync`,
-		order.Status, order.ConfirmedAt, restorable, order.ID).Scan(&state)
+// currentStatus re-reads the persisted status after a guarded write matched no
+// row, to tell a missing order from a concurrent change.
+func (r *OrderRepository) currentStatus(ctx context.Context, id string) (domain.OrderStatus, error) {
+	var status domain.OrderStatus
+	err := r.pool.QueryRow(ctx, `SELECT status FROM orders WHERE id = $1`, id).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", domain.NewNotFoundError("order not found")
 	}
-	if err != nil {
-		return "", err
-	}
-	return state, nil
+	return status, err
 }
 
 func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, from, to domain.StockSyncState) (bool, error) {

@@ -3,6 +3,8 @@ package application
 import (
 	"context"
 
+	zlog "github.com/rs/zerolog/log"
+
 	"goodfood/order-service/internal/domain"
 )
 
@@ -46,10 +48,35 @@ func (uc *UseCases) ConfirmOrder(ctx context.Context, actor Actor, orderID strin
 	// leave a paid order unconfirmed or untracked.
 	persistCtx, cancel := detached(ctx)
 	defer cancel()
-	if err := uc.orders.ConfirmWithStockSync(persistCtx, order, domain.StockSyncConsumePending); err != nil {
+	applied, err := uc.orders.ConfirmWithStockSync(persistCtx, order, domain.StockSyncConsumePending)
+	if err != nil {
 		return nil, err
+	}
+	if !applied {
+		return uc.confirmLostRace(persistCtx, order.ID)
 	}
 	order.StockSync = domain.StockSyncConsumePending
 	uc.consumeStock(ctx, order)
 	return order, nil
+}
+
+// confirmLostRace handles a confirmation whose guarded write found the order
+// no longer PAYMENT_PENDING. A concurrent confirmation already owns the stock
+// consumption (the retry worker covers its failures), so the current order is
+// returned as is. A cancellation that won is reported as a conflict: the
+// payment succeeded on a cancelled order, a refund matter outside this flow.
+func (uc *UseCases) confirmLostRace(ctx context.Context, orderID string) (*domain.Order, error) {
+	current, err := uc.orders.GetByID(ctx, orderID)
+	if err != nil {
+		return nil, err
+	}
+	switch current.Status {
+	case domain.StatusCancelled:
+		zlog.Error().Str("order_id", orderID).Msg("payment confirmed for an order cancelled concurrently: needs a manual refund")
+		return nil, domain.NewConflictError("order was cancelled while its payment was being confirmed")
+	case domain.StatusPlaced, domain.StatusPaymentPending:
+		return nil, domain.NewConflictError("order changed concurrently, retry")
+	default:
+		return current, nil // already confirmed (or further along) by another request
+	}
 }

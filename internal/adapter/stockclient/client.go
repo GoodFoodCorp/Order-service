@@ -8,8 +8,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
+
+	zlog "github.com/rs/zerolog/log"
 
 	"goodfood/order-service/internal/domain"
 )
@@ -58,6 +61,17 @@ type checkResponse struct {
 	} `json:"missing"`
 }
 
+type consumeResponse struct {
+	Status     string `json:"status"`
+	Shortfalls []struct {
+		StockItemID string  `json:"stockItemId"`
+		Shortfall   float64 `json:"shortfall"`
+	} `json:"shortfalls"`
+}
+
+// maxResponseBytes caps how much of a stock-service response is read.
+const maxResponseBytes = 1 << 20
+
 type errorResponse struct {
 	Error string `json:"error"`
 }
@@ -86,8 +100,33 @@ func (c *Client) Check(ctx context.Context, restaurantID string, lines []domain.
 }
 
 // Consume decrements the stock for an order (idempotent on the stock side).
+// A 2xx means stock-service recorded the consumption; the body is only
+// inspected to make drift visible in the logs (a consume skipped because the
+// order was already cancelled on stock's side, or ingredients that were short),
+// never to fail the call.
 func (c *Client) Consume(ctx context.Context, orderID, restaurantID string, lines []domain.StockLine) error {
-	return c.post(ctx, "/internal/stocks/consume", consumeRequest{OrderID: orderID, TenantID: restaurantID, Lines: toDTO(lines)}, nil)
+	body, err := c.do(ctx, "/internal/stocks/consume", consumeRequest{OrderID: orderID, TenantID: restaurantID, Lines: toDTO(lines)})
+	if err != nil {
+		return err
+	}
+	var parsed consumeResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		zlog.Warn().Err(err).Str("order_id", orderID).Msg("unreadable stock-service consume response (consumption was accepted)")
+		return nil
+	}
+	if parsed.Status == "SKIPPED_CANCELLED" {
+		zlog.Warn().Str("order_id", orderID).Str("status", parsed.Status).
+			Msg("stock-service skipped the consumption: the order is already cancelled on its side")
+	}
+	if len(parsed.Shortfalls) > 0 {
+		ev := zlog.Warn().Str("order_id", orderID).Str("status", parsed.Status)
+		items := make([]string, 0, len(parsed.Shortfalls))
+		for _, sf := range parsed.Shortfalls {
+			items = append(items, fmt.Sprintf("%s:%g", sf.StockItemID, sf.Shortfall))
+		}
+		ev.Strs("shortfalls", items).Msg("stock consumed with shortfalls: ingredients were insufficient")
+	}
+	return nil
 }
 
 // Restore puts back what an order consumed (idempotent on the stock side).
@@ -96,36 +135,49 @@ func (c *Client) Restore(ctx context.Context, orderID, restaurantID string) erro
 }
 
 func (c *Client) post(ctx context.Context, path string, payload, out any) error {
-	body, err := json.Marshal(payload)
+	body, err := c.do(ctx, path, payload)
 	if err != nil {
 		return err
 	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("invalid stock-service response: %w", err)
+	}
+	return nil
+}
+
+// do sends the request and returns the body of a 2xx response.
+func (c *Client) do(ctx context.Context, path string, payload any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("stock-service request: %w", err)
+		return nil, fmt.Errorf("stock-service request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Service-Key", c.serviceKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("stock-service unreachable: %w", err)
+		return nil, fmt.Errorf("stock-service unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var e errorResponse
-		_ = json.NewDecoder(resp.Body).Decode(&e)
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxResponseBytes)).Decode(&e)
 		if e.Error != "" {
-			return fmt.Errorf("stock-service returned %d: %s", resp.StatusCode, e.Error)
+			return nil, fmt.Errorf("stock-service returned %d: %s", resp.StatusCode, e.Error)
 		}
-		return fmt.Errorf("stock-service returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("stock-service returned %d", resp.StatusCode)
 	}
-	if out == nil {
-		return nil
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	if err != nil {
+		return nil, fmt.Errorf("invalid stock-service response: %w", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("invalid stock-service response: %w", err)
-	}
-	return nil
+	return respBody, nil
 }

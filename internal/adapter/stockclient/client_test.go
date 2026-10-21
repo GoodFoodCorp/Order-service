@@ -1,12 +1,16 @@
 package stockclient
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 
 	"goodfood/order-service/internal/domain"
 )
@@ -144,5 +148,71 @@ func TestUnreachable(t *testing.T) {
 	err := cl.Restore(ctx, "o1", "r1")
 	if err == nil || strings.Contains(err.Error(), key) {
 		t.Errorf("restore err = %v", err)
+	}
+}
+
+// captureLogs redirects the global zerolog logger for the duration of a test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := zlog.Logger
+	zlog.Logger = zerolog.New(&buf)
+	t.Cleanup(func() { zlog.Logger = previous })
+	return &buf
+}
+
+func TestConsumeLogsDriftWithoutFailing(t *testing.T) {
+	for _, tc := range []struct {
+		name, resp, want string
+	}{
+		{"skipped cancelled", `{"status":"SKIPPED_CANCELLED","shortfalls":[]}`, "SKIPPED_CANCELLED"},
+		{"shortfalls", `{"status":"APPLIED","shortfalls":[{"stockItemId":"s1","shortfall":0.5}]}`, "s1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureLogs(t)
+			var got captured
+			srv := server(t, 200, tc.resp, &got)
+			defer srv.Close()
+
+			if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+				t.Fatalf("consume must not fail on a 2xx: %v", err)
+			}
+			out := logs.String()
+			if !strings.Contains(out, `"level":"warn"`) || !strings.Contains(out, `"order_id":"o1"`) || !strings.Contains(out, tc.want) {
+				t.Errorf("expected a warning with order id and %q, got %q", tc.want, out)
+			}
+			if strings.Contains(out, key) {
+				t.Errorf("log leaks key: %s", out)
+			}
+		})
+	}
+}
+
+func TestConsumeAppliedDoesNotWarn(t *testing.T) {
+	for _, resp := range []string{`{"status":"APPLIED","shortfalls":[]}`, `{"status":"ALREADY_APPLIED","shortfalls":[]}`} {
+		logs := captureLogs(t)
+		var got captured
+		srv := server(t, 200, resp, &got)
+		if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+			t.Fatal(err)
+		}
+		srv.Close()
+		if logs.Len() != 0 {
+			t.Errorf("%s: unexpected log %q", resp, logs.String())
+		}
+	}
+}
+
+func TestConsumeUnreadableSuccessBodyIsNotAnError(t *testing.T) {
+	logs := captureLogs(t)
+	var got captured
+	srv := server(t, 200, `not json`, &got)
+	defer srv.Close()
+
+	if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+		t.Fatalf("the consume was applied, an unreadable body must not trigger a retry: %v", err)
+	}
+	if !strings.Contains(logs.String(), `"order_id":"o1"`) {
+		t.Errorf("expected a warning, got %q", logs.String())
 	}
 }

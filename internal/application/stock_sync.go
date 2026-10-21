@@ -9,14 +9,6 @@ import (
 	"goodfood/order-service/internal/domain"
 )
 
-// stockRestorableStatuses are the statuses from which a cancellation puts the
-// ingredients back (the order was paid, so stock may have been consumed).
-var stockRestorableStatuses = map[domain.OrderStatus]bool{
-	domain.StatusConfirmed:      true,
-	domain.StatusInPreparation:  true,
-	domain.StatusReadyForPickup: true,
-}
-
 // stockSyncTimeout bounds the detached stock work (lookup, call, state write).
 const stockSyncTimeout = 30 * time.Second
 

@@ -9,15 +9,27 @@ type OrderRepository interface {
 	ListByCustomer(ctx context.Context, customerID string) ([]Order, error)
 	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
 	ListByStatus(ctx context.Context, status OrderStatus) ([]Order, error)
-	UpdateStatus(ctx context.Context, order *Order) error
+	// UpdateStatus writes order.Status (and confirmed_at) only if the persisted
+	// status still equals from, the status the caller read — a stale read can
+	// never regress or resurrect an order. If the row already holds the target
+	// status (a concurrent identical update) it succeeds without writing;
+	// otherwise a concurrent change yields a CONFLICT error.
+	UpdateStatus(ctx context.Context, order *Order, from OrderStatus) error
 	// ConfirmWithStockSync writes the CONFIRMED status, confirmed_at and the
 	// stock_sync intent in one UPDATE, so a paid order is never left without
-	// a pending consumption.
-	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState) error
-	// CancelWithStockSync cancels the order and, when restorable (the order was
-	// paid), atomically moves CONSUMED / CONSUME_PENDING to RESTORE_PENDING.
-	// It returns the resulting stock_sync state.
-	CancelWithStockSync(ctx context.Context, order *Order, restorable bool) (StockSyncState, error)
+	// a pending consumption. The write only applies while the persisted status
+	// is PAYMENT_PENDING (the only predecessor of CONFIRMED); applied=false
+	// means another request changed the order first (or it does not exist) and
+	// nothing was written — the caller re-reads the order.
+	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState) (applied bool, err error)
+	// CancelWithStockSync cancels the order if its persisted status still allows
+	// it, deciding the stock outcome from the row's own pre-update values (not
+	// from the caller's possibly stale read): a paid order (CONFIRMED,
+	// IN_PREPARATION, READY_FOR_PICKUP) whose stock_sync is CONSUMED or
+	// CONSUME_PENDING moves to RESTORE_PENDING. order.StockSync and
+	// order.ConfirmedAt are refreshed from the updated row. A missing order
+	// yields NOT_FOUND, a status that no longer allows cancelling a CONFLICT.
+	CancelWithStockSync(ctx context.Context, order *Order) error
 	// UpdateStockSync is a compare-and-set: stock_sync moves from -> to only if
 	// it currently equals from. applied=false (lost race) is not an error.
 	UpdateStockSync(ctx context.Context, orderID string, from, to StockSyncState) (applied bool, err error)

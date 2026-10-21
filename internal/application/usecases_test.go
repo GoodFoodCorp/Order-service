@@ -21,6 +21,19 @@ type fakeOrderRepo struct {
 	stockSyncErr error
 	// confirmWrites records each ConfirmWithStockSync call (one atomic write).
 	confirmWrites []confirmWrite
+	// beforeWrite, when set, runs once just before the next status write
+	// (UpdateStatus / ConfirmWithStockSync / CancelWithStockSync), after the
+	// use case has read the order: it simulates a concurrent request that
+	// commits in between.
+	beforeWrite func()
+}
+
+// interleave runs the one-shot beforeWrite hook, if any.
+func (f *fakeOrderRepo) interleave() {
+	if hook := f.beforeWrite; hook != nil {
+		f.beforeWrite = nil
+		hook()
+	}
 }
 
 type confirmWrite struct {
@@ -78,39 +91,70 @@ func (f *fakeOrderRepo) ListByStatus(_ context.Context, status domain.OrderStatu
 	return out, nil
 }
 
-func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order) error {
+// UpdateStatus mirrors the guarded SQL: it writes only while the stored
+// status equals from; on a mismatch, an already-applied target is a no-op and
+// anything else a conflict.
+func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order, from domain.OrderStatus) error {
+	f.interleave()
 	stored, ok := f.orders[o.ID]
 	if !ok {
 		return domain.NewNotFoundError("order not found")
+	}
+	if stored.Status != from {
+		if stored.Status == o.Status {
+			return nil
+		}
+		return domain.NewConflictError("order changed concurrently, retry")
 	}
 	stored.Status = o.Status
 	stored.ConfirmedAt = o.ConfirmedAt
 	return nil
 }
 
-func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order, state domain.StockSyncState) error {
+// ConfirmWithStockSync mirrors `WHERE id = $4 AND status = 'PAYMENT_PENDING'`:
+// zero rows (missing or other status) is applied=false, nothing written.
+func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order, state domain.StockSyncState) (bool, error) {
+	f.interleave()
 	stored, ok := f.orders[o.ID]
-	if !ok {
-		return domain.NewNotFoundError("order not found")
+	if !ok || stored.Status != domain.StatusPaymentPending {
+		return false, nil
 	}
 	stored.Status = o.Status
 	stored.ConfirmedAt = o.ConfirmedAt
 	stored.StockSync = state
 	f.confirmWrites = append(f.confirmWrites, confirmWrite{o.Status, state})
-	return nil
+	return true, nil
 }
 
-func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order, restorable bool) (domain.StockSyncState, error) {
+// stockRestorableStatuses mirrors the SQL CASE of CancelWithStockSync: the
+// paid statuses from which a cancellation puts the ingredients back.
+var stockRestorableStatuses = map[domain.OrderStatus]bool{
+	domain.StatusConfirmed:      true,
+	domain.StatusInPreparation:  true,
+	domain.StatusReadyForPickup: true,
+}
+
+// CancelWithStockSync mirrors the SQL: guarded on a cancellable stored status,
+// restorability computed from the stored (pre-update) status and stock_sync,
+// RETURNING stock_sync and confirmed_at.
+func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order) error {
+	f.interleave()
 	stored, ok := f.orders[o.ID]
 	if !ok {
-		return "", domain.NewNotFoundError("order not found")
+		return domain.NewNotFoundError("order not found")
 	}
-	stored.Status = o.Status
-	stored.ConfirmedAt = o.ConfirmedAt
-	if restorable && (stored.StockSync == domain.StockSyncConsumed || stored.StockSync == domain.StockSyncConsumePending) {
+	if !stored.CanTransitionTo(domain.StatusCancelled) {
+		return domain.NewConflictError("order changed concurrently, retry")
+	}
+	if stockRestorableStatuses[stored.Status] &&
+		(stored.StockSync == domain.StockSyncConsumed || stored.StockSync == domain.StockSyncConsumePending) {
 		stored.StockSync = domain.StockSyncRestorePending
 	}
-	return stored.StockSync, nil
+	stored.Status = domain.StatusCancelled
+	o.Status = domain.StatusCancelled
+	o.StockSync = stored.StockSync
+	o.ConfirmedAt = stored.ConfirmedAt
+	return nil
 }
 
 func (f *fakeOrderRepo) UpdateStockSync(_ context.Context, orderID string, from, to domain.StockSyncState) (bool, error) {
@@ -1402,4 +1446,138 @@ func TestPlaceOrderRejectsNonUUIDMenuItemID(t *testing.T) {
 	assert.Equal(t, "menu item id must be a valid UUID", de.Message)
 	assert.Empty(t, orders.orders)
 	assert.Equal(t, 0, stock.checkCalls)
+}
+
+// ── Concurrent status writes (guarded UPDATEs) ──────────────
+
+func steakRecipe(recipes *fakeRecipes) {
+	recipes.recipes["11111111-1111-4111-8111-111111111111"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+}
+
+// Scenario (a): the cancel was built from a PAYMENT_PENDING read, but the
+// confirmation (and possibly its consume) committed before the cancel write.
+func TestCancelBuiltFromStalePaymentPendingReadStillRestores(t *testing.T) {
+	for _, consumeDown := range []bool{false, true} {
+		name := "consume applied"
+		if consumeDown {
+			name = "consume still pending"
+		}
+		t.Run(name, func(t *testing.T) {
+			uc, orders, _, recipes, stock := setupStock()
+			steakRecipe(recipes)
+			if consumeDown {
+				stock.consumeErr = errors.New("down")
+			}
+			order := placeStockOrder(t, uc, burger(1))
+			_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+			require.NoError(t, err)
+			orders.beforeWrite = func() { payAndConfirm(t, uc, order.ID) }
+
+			cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+
+			require.NoError(t, err)
+			assert.Equal(t, domain.StatusCancelled, cancelled.Status)
+			assert.Equal(t, domain.StockSyncRestored, cancelled.StockSync)
+			stored, _ := orders.GetByID(context.Background(), order.ID)
+			assert.Equal(t, domain.StatusCancelled, stored.Status)
+			assert.Equal(t, domain.StockSyncRestored, stored.StockSync)
+			assert.Equal(t, 1, stock.consumeCalls)
+			assert.Equal(t, []restoreCall{{orderID: order.ID, restaurantID: "resto-1"}}, stock.restored)
+		})
+	}
+}
+
+// Scenario (b): a slow duplicate confirmation read PAYMENT_PENDING; meanwhile
+// the order was confirmed, cancelled and restored.
+func TestLateDuplicateConfirmAfterCancelDoesNotResetTheOrder(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	steakRecipe(recipes)
+	order := placeStockOrder(t, uc, burger(1))
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	orders.beforeWrite = func() {
+		payAndConfirm(t, uc, order.ID)
+		_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+		require.NoError(t, err)
+	}
+
+	_, err = uc.ConfirmOrder(context.Background(), customer, order.ID)
+
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrCodeConflict, de.Code)
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusCancelled, stored.Status)
+	assert.Equal(t, domain.StockSyncRestored, stored.StockSync)
+	assert.Equal(t, 1, stock.consumeCalls, "the late confirmation must not consume")
+	assert.Equal(t, 1, stock.restoreCalls)
+}
+
+func TestConcurrentDuplicateConfirmIsIdempotentAndConsumesOnce(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	steakRecipe(recipes)
+	order := placeStockOrder(t, uc, burger(1))
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	orders.beforeWrite = func() { payAndConfirm(t, uc, order.ID) }
+
+	again, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusConfirmed, again.Status)
+	assert.Equal(t, domain.StockSyncConsumed, again.StockSync, "returns the persisted order")
+	assert.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, order.ID))
+	assert.Equal(t, 1, stock.consumeCalls)
+	assert.Len(t, orders.confirmWrites, 1, "only the first confirmation is written")
+}
+
+func TestCancelConflictsWhenStatusMovedPastCancellable(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	steakRecipe(recipes)
+	order := placeStockOrder(t, uc, burger(1))
+	payAndConfirm(t, uc, order.ID)
+	orders.beforeWrite = func() { orders.orders[order.ID].Status = domain.StatusInDelivery }
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrCodeConflict, de.Code)
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusInDelivery, stored.Status)
+	assert.Equal(t, domain.StockSyncConsumed, stored.StockSync)
+	assert.Equal(t, 0, stock.restoreCalls)
+}
+
+func TestStatusUpdateDoesNotResurrectConcurrentlyCancelledOrder(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	steakRecipe(recipes)
+	order := placeStockOrder(t, uc, burger(1))
+	payAndConfirm(t, uc, order.ID)
+	orders.beforeWrite = func() {
+		_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+		require.NoError(t, err)
+	}
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+
+	var de *domain.Error
+	require.ErrorAs(t, err, &de)
+	assert.Equal(t, domain.ErrCodeConflict, de.Code)
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusCancelled, stored.Status)
+	assert.Equal(t, domain.StockSyncRestored, stored.StockSync)
+	assert.Equal(t, 1, stock.restoreCalls)
+}
+
+func TestStatusUpdateAlreadyAppliedConcurrentlyIsNotAConflict(t *testing.T) {
+	uc, orders, _, _, _ := setupStock()
+	order := placeStockOrder(t, uc, burger(1))
+	orders.beforeWrite = func() { orders.orders[order.ID].Status = domain.StatusPaymentPending }
+
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+
+	require.NoError(t, err)
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusPaymentPending, stored.Status)
 }

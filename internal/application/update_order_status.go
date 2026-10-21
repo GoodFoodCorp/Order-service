@@ -45,13 +45,13 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 		return nil, err
 	}
 	if target == domain.StatusCancelled {
-		state, err := uc.orders.CancelWithStockSync(ctx, order, stockRestorableStatuses[previous])
-		if err != nil {
+		// The repository decides restorability from the persisted row, so a
+		// confirmation committed after our read is still restored.
+		if err := uc.orders.CancelWithStockSync(ctx, order); err != nil {
 			return nil, err
 		}
-		order.StockSync = state
 		uc.restoreStock(ctx, order)
-	} else if err := uc.orders.UpdateStatus(ctx, order); err != nil {
+	} else if err := uc.orders.UpdateStatus(ctx, order, previous); err != nil {
 		return nil, err
 	}
 	if target == domain.StatusReadyForPickup {
