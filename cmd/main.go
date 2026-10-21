@@ -95,15 +95,21 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	log.Info().Str("port", cfg.Port).Msg("order-service started")
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		<-runCtx.Done()
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelShutdown()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("graceful shutdown failed")
+		}
 	}()
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal().Err(err).Msg("server stopped")
 	}
+	<-done // ListenAndServe returns as soon as Shutdown starts: wait for in-flight requests
+	log.Info().Msg("order-service stopped")
 }
 
 // runStockRetry replays pending stock synchronisation until ctx ends.

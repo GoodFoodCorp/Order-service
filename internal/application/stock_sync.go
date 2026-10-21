@@ -91,17 +91,25 @@ func (uc *UseCases) restoreStock(ctx context.Context, order *domain.Order) {
 // RetryStockSync replays the stock work left pending (stock-service or
 // menu-service was down, or the process crashed). Oldest orders first, at most
 // limit per pass; each order is handled independently and failures stay
-// pending for the next pass. It returns the number of orders handled.
+// pending for the next pass. It returns the number of orders attempted (a failed attempt counts);
+// it stops starting new work once ctx is cancelled.
 func (uc *UseCases) RetryStockSync(ctx context.Context, limit int) (processed int) {
 	pending, err := uc.orders.ListByStockSync(ctx, []domain.StockSyncState{
 		domain.StockSyncConsumePending,
 		domain.StockSyncRestorePending,
 	}, limit)
 	if err != nil {
+		if ctx.Err() != nil {
+			zlog.Debug().Err(err).Msg("stock sync retry interrupted")
+			return 0
+		}
 		zlog.Error().Err(err).Msg("could not list orders pending stock synchronisation")
 		return 0
 	}
 	for i := range pending {
+		if ctx.Err() != nil {
+			break
+		}
 		order := &pending[i]
 		switch {
 		case order.StockSync == domain.StockSyncConsumePending && order.Status == domain.StatusCancelled:

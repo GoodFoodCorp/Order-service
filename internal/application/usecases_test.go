@@ -1345,3 +1345,18 @@ func TestRetryRespectsLimit(t *testing.T) {
 	assert.Equal(t, 1, second)
 	assert.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, ids[2]))
 }
+
+func TestRetryStartsNoWorkOnCancelledContext(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	id := pendingOrder(t, uc, orders, domain.StatusConfirmed, domain.StockSyncConsumePending)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	processed := uc.RetryStockSync(ctx, 50)
+
+	assert.Equal(t, 0, processed)
+	assert.Equal(t, 0, stock.consumeCalls)
+	assert.Equal(t, 0, stock.restoreCalls)
+	assert.Equal(t, domain.StockSyncConsumePending, storedSync(t, orders, id))
+}
