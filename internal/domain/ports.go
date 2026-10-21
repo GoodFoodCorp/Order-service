@@ -8,7 +8,7 @@ type OrderRepository interface {
 	GetByID(ctx context.Context, id string) (*Order, error)
 	ListByCustomer(ctx context.Context, customerID string) ([]Order, error)
 	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
-	ListByStatus(ctx context.Context, status OrderStatus) ([]Order, error)
+	ListByStatuses(ctx context.Context, statuses ...OrderStatus) ([]Order, error)
 	// UpdateStatus writes order.Status (and confirmed_at) only if the persisted
 	// status still equals from, the status the caller read — a stale read can
 	// never regress or resurrect an order. If the row already holds the target
