@@ -11,10 +11,12 @@ import (
 	"github.com/rs/zerolog"
 
 	httpadapter "goodfood/order-service/internal/adapter/http"
+	"goodfood/order-service/internal/adapter/menuclient"
 	"goodfood/order-service/internal/adapter/messaging"
 	"goodfood/order-service/internal/adapter/paymentclient"
 	"goodfood/order-service/internal/adapter/postgres"
 	"goodfood/order-service/internal/adapter/promoclient"
+	"goodfood/order-service/internal/adapter/stockclient"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
 	"goodfood/order-service/internal/domain"
@@ -57,9 +59,12 @@ func main() {
 		paymentclient.New(cfg.PaymentServiceURL),
 		promoclient.New(cfg.PromoServiceURL),
 		events,
+		menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey),
+		stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
 	)
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
+	log.Info().Str("menu_service", cfg.MenuServiceURL).Str("stock_service", cfg.StockServiceURL).Msg("stock checked against stock-service using menu-service recipes")
 
 	router := httpadapter.NewRouter(
 		httpadapter.NewOrderHandler(uc),

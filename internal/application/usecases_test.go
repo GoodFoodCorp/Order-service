@@ -139,6 +139,66 @@ func (f *fakePromos) Redeem(_ context.Context, _, code, orderID string, orderAmo
 	return orderAmountCents * int64(percent) / 100, nil
 }
 
+// fakeRecipes stands in for menu-service recipes. Dishes absent from the map
+// have no recipe.
+type fakeRecipes struct {
+	recipes map[string][]domain.StockLine
+	err     error
+	lookups []lookupCall
+}
+
+type lookupCall struct {
+	restaurantID string
+	menuItemIDs  []string
+}
+
+func newFakeRecipes() *fakeRecipes {
+	return &fakeRecipes{recipes: map[string][]domain.StockLine{}}
+}
+
+func (f *fakeRecipes) Lookup(_ context.Context, restaurantID string, menuItemIDs []string) (map[string][]domain.StockLine, error) {
+	f.lookups = append(f.lookups, lookupCall{restaurantID, menuItemIDs})
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.recipes, nil
+}
+
+// fakeStock stands in for stock-service; it records what it is asked.
+type fakeStock struct {
+	availability *domain.StockAvailability
+	checkErr     error
+	checkCalls   int
+	checkedFor   string
+	checkedLines []domain.StockLine
+	consumeCalls int
+	restoreCalls int
+}
+
+func newFakeStock() *fakeStock {
+	return &fakeStock{availability: &domain.StockAvailability{Available: true}}
+}
+
+func (f *fakeStock) Check(_ context.Context, restaurantID string, lines []domain.StockLine) (*domain.StockAvailability, error) {
+	f.checkCalls++
+	f.checkedFor = restaurantID
+	f.checkedLines = lines
+	if f.checkErr != nil {
+		return nil, f.checkErr
+	}
+	return f.availability, nil
+}
+
+func (f *fakeStock) Consume(context.Context, string, string, []domain.StockLine) error {
+	f.consumeCalls++
+	return nil
+}
+
+func (f *fakeStock) Restore(context.Context, string, string) error {
+	f.restoreCalls++
+	return nil
+}
+
 // ── Test fixtures ───────────────────────────────────────────
 
 var (
@@ -153,7 +213,16 @@ func setup() (*UseCases, *fakeOrderRepo, *fakePayments, *fakePromos) {
 	orders := newFakeOrderRepo()
 	payments := newFakePayments()
 	promos := newFakePromos()
-	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}), orders, payments, promos
+	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}, newFakeRecipes(), newFakeStock()), orders, payments, promos
+}
+
+// setupStock builds use cases whose recipes/stock fakes the test can drive.
+func setupStock() (*UseCases, *fakeOrderRepo, *fakePromos, *fakeRecipes, *fakeStock) {
+	orders := newFakeOrderRepo()
+	promos := newFakePromos()
+	recipes := newFakeRecipes()
+	stock := newFakeStock()
+	return NewUseCases(orders, newFakePayments(), promos, domain.NoopPublisher{}, recipes, stock), orders, promos, recipes, stock
 }
 
 func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
@@ -227,6 +296,127 @@ func TestPlaceOrderRejectsUnknownPromoCode(t *testing.T) {
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+}
+
+// ── PlaceOrder: stock check ─────────────────────────────────
+
+func stockOrderInput(items ...domain.NewOrderItemInput) PlaceOrderInput {
+	return PlaceOrderInput{RestaurantID: "resto-1", DeliveryAddress: "12 rue de Paris", Items: items}
+}
+
+func burger(qty int) domain.NewOrderItemInput {
+	return domain.NewOrderItemInput{MenuItemID: "m1", MenuItemName: "Burger", Quantity: qty, UnitPriceCents: 1299}
+}
+
+func TestPlaceOrderRefusesWhenIngredientMissing(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	stock.availability = &domain.StockAvailability{Available: false, Missing: []domain.MissingStock{
+		{StockItemID: "steak", Name: "Steak", Unit: "kg", Required: 2, OnHand: 1},
+	}}
+
+	_, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(burger(2)))
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeOutOfStock, derr.Code)
+	assert.Equal(t, "Stock insuffisant pour « Burger » : Steak (besoin 2 kg, disponible 1)", derr.Message)
+	assert.Empty(t, orders.orders, "nothing is created when stock is short")
+}
+
+func TestPlaceOrderSucceedsAndDoesNotTouchStockQuantities(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 0.2}, {StockItemID: "bun", Quantity: 1}}
+	recipes.recipes["m2"] = []domain.StockLine{{StockItemID: "steak", Quantity: 0.15}}
+
+	order, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(
+		burger(2),
+		domain.NewOrderItemInput{MenuItemID: "m2", MenuItemName: "Double", Quantity: 1, UnitPriceCents: 1500},
+	))
+
+	require.NoError(t, err)
+	assert.Len(t, orders.orders, 1)
+	assert.Equal(t, domain.StatusPlaced, order.Status)
+	assert.Equal(t, 1, stock.checkCalls)
+	assert.Equal(t, "resto-1", stock.checkedFor)
+	assert.Equal(t, []domain.StockLine{{StockItemID: "bun", Quantity: 2}, {StockItemID: "steak", Quantity: 0.55}}, stock.checkedLines)
+	require.Len(t, recipes.lookups, 1)
+	assert.Equal(t, "resto-1", recipes.lookups[0].restaurantID)
+	assert.Equal(t, []string{"m1", "m2"}, recipes.lookups[0].menuItemIDs)
+	assert.Equal(t, 0, stock.consumeCalls)
+	assert.Equal(t, 0, stock.restoreCalls)
+}
+
+func TestPlaceOrderSkipsStockCallWhenNoDishHasARecipe(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+
+	_, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(burger(1)))
+
+	require.NoError(t, err)
+	assert.Len(t, orders.orders, 1)
+	assert.Len(t, recipes.lookups, 1)
+	assert.Equal(t, 0, stock.checkCalls)
+}
+
+func TestPlaceOrderMixedRecipeAndUntrackedDishChecksOnlyTrackedIngredients(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m2"] = []domain.StockLine{{StockItemID: "cola", Quantity: 0.33}}
+
+	_, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(
+		burger(3),
+		domain.NewOrderItemInput{MenuItemID: "m2", MenuItemName: "Soda", Quantity: 2, UnitPriceCents: 300},
+	))
+
+	require.NoError(t, err)
+	assert.Len(t, orders.orders, 1)
+	assert.Equal(t, 1, stock.checkCalls)
+	assert.Equal(t, []domain.StockLine{{StockItemID: "cola", Quantity: 0.66}}, stock.checkedLines)
+}
+
+func TestPlaceOrderRefusesWithUnavailableWhenRecipeLookupFails(t *testing.T) {
+	uc, orders, promos, recipes, stock := setupStock()
+	promos.codes["WELCOME10"] = 10
+	recipes.err = errors.New("menu down")
+	in := stockOrderInput(burger(1))
+	in.PromoCode = "WELCOME10"
+
+	_, err := uc.PlaceOrder(context.Background(), customer, in)
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeUnavailable, derr.Code)
+	assert.Empty(t, orders.orders)
+	assert.Equal(t, 0, stock.checkCalls)
+}
+
+func TestPlaceOrderRefusesWithUnavailableWhenStockCheckFails(t *testing.T) {
+	uc, orders, _, recipes, stock := setupStock()
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	stock.checkErr = errors.New("stock down")
+
+	_, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(burger(1)))
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeUnavailable, derr.Code)
+	assert.Empty(t, orders.orders)
+}
+
+func TestPlaceOrderDoesNotPreviewPromoWhenStockIsShort(t *testing.T) {
+	uc, orders, promos, recipes, stock := setupStock()
+	promos.previewError = errors.New("preview must not be reached")
+	recipes.recipes["m1"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
+	stock.availability = &domain.StockAvailability{Available: false}
+	in := stockOrderInput(burger(1))
+	in.PromoCode = "WELCOME10"
+
+	_, err := uc.PlaceOrder(context.Background(), customer, in)
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeOutOfStock, derr.Code, "stock is checked before the promo preview")
+	assert.Equal(t, "Stock insuffisant", derr.Message)
+	assert.Empty(t, orders.orders)
 }
 
 // ── GetOrder ────────────────────────────────────────────────
@@ -542,7 +732,7 @@ func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReady
 }
 
 func setupWithPublisher(pub domain.EventPublisher) *UseCases {
-	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub)
+	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub, newFakeRecipes(), newFakeStock())
 }
 
 func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
