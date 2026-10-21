@@ -32,6 +32,8 @@ internal/
 ├── adapter/
 │   ├── http/              # Routeur chi, middlewares (JWT, request-id, logs), DTO
 │   ├── postgres/          # Repository pgx + migrations SQL embarquées
+│   ├── menuclient/        # Client REST vers menu-service (recettes, clé de service)
+│   ├── stockclient/       # Client REST vers stock-service (check/consume/restore, clé de service)
 │   ├── paymentclient/     # Client REST vers payment-service (JWT transmis)
 │   └── promoclient/       # Client REST vers promo-service (JWT transmis)
 └── config/                # Configuration typée depuis l'environnement
@@ -105,6 +107,8 @@ prévue est refusée (`409`) et l'état reste inchangé.
 |---|---|---|
 | **PostgreSQL** (`order-db`) | 🔴 | Le service ne démarre pas |
 | **payment-service** | 🟠 | **Le paiement est impossible** : `payment-intent` et `confirm` renvoient `502`. Le reste fonctionne : création de commande, consultation, historique, changements de statut par le franchisé. Une commande reste bloquée en `PLACED`. |
+| **menu-service** | 🟡 | Dépendance interne (`POST /internal/recipes/lookup`) pour connaître les recettes des plats d'une commande. |
+| **stock-service** | 🟡 | Dépendance interne (`/internal/stocks/check`, `consume`, `restore`) pour contrôler, consommer et restituer le stock des ingrédients. |
 | **promo-service** | 🟡 | Un `promo_code` envoyé à la création est refusé (`400`) ; une commande sans code fonctionne normalement. Aucun impact sur les commandes déjà passées. |
 | **auth-service** | 🟠 | Aucun appel réseau, mais toutes les routes exigent un jeton valide |
 
@@ -124,7 +128,7 @@ prévue est refusée (`409`) et l'état reste inchangé.
 
 ```bash
 docker network create microservices-net   # une seule fois, partagé
-cp .env.example .env                      # renseigner POSTGRES_PASSWORD et JWT_SECRET
+cp .env.example .env                      # renseigner POSTGRES_PASSWORD, JWT_SECRET et SERVICE_API_KEY
 docker compose up -d --build
 ```
 
@@ -142,6 +146,9 @@ uniquement si un code promo est utilisé.
 | `JWT_SECRET` | oui | Secret HS256 partagé avec `auth-service` |
 | `PAYMENT_SERVICE_URL` | non | Défaut `http://payment-service:8086` |
 | `PROMO_SERVICE_URL` | non | Défaut `http://promo-service:8092` |
+| `STOCK_SERVICE_URL` | non | Défaut `http://stock-service` |
+| `MENU_SERVICE_URL` | non | Défaut `http://menu-service` |
+| `SERVICE_API_KEY` | oui | Secret des appels internes (en-tête `X-Service-Key`), **identique** à celui de `stock-service` et `menu-service` ; jamais loggé |
 | `LOG_LEVEL` | non (info) | `debug`, `info`, `warn`, `error` |
 
 ---
