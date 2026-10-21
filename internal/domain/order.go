@@ -62,6 +62,7 @@ type Order struct {
 	ConfirmedAt      *time.Time
 	PromoCode        *string
 	DiscountCents    int64
+	StockSync        StockSyncState
 }
 
 type NewOrderItemInput struct {
@@ -123,6 +124,7 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		DeliveryAddress:  strings.TrimSpace(deliveryAddress),
 		Items:            orderItems,
 		PlacedAt:         time.Now().UTC(),
+		StockSync:        StockSyncNone,
 	}, nil
 }
 

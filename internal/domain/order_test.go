@@ -147,3 +147,9 @@ func TestOrderOwnership(t *testing.T) {
 	assert.True(t, order.IsOwnedBy("user-1"))
 	assert.False(t, order.IsOwnedBy("user-2"))
 }
+
+func TestNewOrder_starts_with_stock_sync_none(t *testing.T) {
+	o, err := NewOrder("c1", "r1", "12 rue de Paris", validItems())
+	require.NoError(t, err)
+	assert.Equal(t, StockSyncNone, o.StockSync)
+}

@@ -121,6 +121,8 @@ func writeDomainError(w http.ResponseWriter, r *http.Request, err error) {
 			domain.ErrCodeInvalidTransition: http.StatusConflict,
 			domain.ErrCodeConflict:          http.StatusConflict,
 			domain.ErrCodePayment:           http.StatusBadGateway,
+			domain.ErrCodeOutOfStock:        http.StatusConflict,
+			domain.ErrCodeUnavailable:       http.StatusServiceUnavailable,
 		}[derr.Code]
 		if status == 0 {
 			status = http.StatusInternalServerError
