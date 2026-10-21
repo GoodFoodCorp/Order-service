@@ -12,8 +12,8 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@order-db:5432/${POSTGRES_DB}?sslmode=disable
       PAYMENT_SERVICE_URL: http://payment-service:8086
       PROMO_SERVICE_URL: http://promo-service:8092
-      STOCK_SERVICE_URL: http://stock-service
-      MENU_SERVICE_URL: http://menu-service
+      STOCK_SERVICE_URL: http://stock-service:8083
+      MENU_SERVICE_URL: http://menu-service:8085
       # Secret partagé pour les appels internes (Stock, Menu) — jamais loggé
       SERVICE_API_KEY: ${SERVICE_API_KEY:?SERVICE_API_KEY must be set (shared with Stock and Menu services)}
       # Broker du compose du Delivery-service (réseau partagé microservices-net)

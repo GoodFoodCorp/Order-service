@@ -146,8 +146,8 @@ uniquement si un code promo est utilisé.
 | `JWT_SECRET` | oui | Secret HS256 partagé avec `auth-service` |
 | `PAYMENT_SERVICE_URL` | non | Défaut `http://payment-service:8086` |
 | `PROMO_SERVICE_URL` | non | Défaut `http://promo-service:8092` |
-| `STOCK_SERVICE_URL` | non | Défaut `http://stock-service` |
-| `MENU_SERVICE_URL` | non | Défaut `http://menu-service` |
+| `STOCK_SERVICE_URL` | non | Défaut `http://stock-service:8083` |
+| `MENU_SERVICE_URL` | non | Défaut `http://menu-service:8085` |
 | `SERVICE_API_KEY` | oui | Secret des appels internes (en-tête `X-Service-Key`), **identique** à celui de `stock-service` et `menu-service` ; jamais loggé |
 | `LOG_LEVEL` | non (info) | `debug`, `info`, `warn`, `error` |
 

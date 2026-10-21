@@ -27,7 +27,7 @@ func TestLoadServiceDefaults(t *testing.T) {
 	if cfg.ServiceAPIKey != "svc-key" {
 		t.Errorf("ServiceAPIKey = %q", cfg.ServiceAPIKey)
 	}
-	if cfg.StockServiceURL != "http://stock-service" || cfg.MenuServiceURL != "http://menu-service" {
+	if cfg.StockServiceURL != "http://stock-service:8083" || cfg.MenuServiceURL != "http://menu-service:8085" {
 		t.Errorf("defaults = %q %q", cfg.StockServiceURL, cfg.MenuServiceURL)
 	}
 }

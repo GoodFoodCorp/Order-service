@@ -27,8 +27,8 @@ func Load() (*Config, error) {
 		JWTSecret:         os.Getenv("JWT_SECRET"),
 		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
 		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
-		StockServiceURL:   getEnv("STOCK_SERVICE_URL", "http://stock-service"),
-		MenuServiceURL:    getEnv("MENU_SERVICE_URL", "http://menu-service"),
+		StockServiceURL:   getEnv("STOCK_SERVICE_URL", "http://stock-service:8083"),
+		MenuServiceURL:    getEnv("MENU_SERVICE_URL", "http://menu-service:8085"),
 		ServiceAPIKey:     os.Getenv("SERVICE_API_KEY"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		RabbitMQURL:       os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
