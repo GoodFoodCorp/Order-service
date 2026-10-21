@@ -11,6 +11,9 @@ type Config struct {
 	JWTSecret         string
 	PaymentServiceURL string
 	PromoServiceURL   string
+	StockServiceURL   string
+	MenuServiceURL    string
+	ServiceAPIKey     string
 	LogLevel          string
 	RabbitMQURL       string
 }
@@ -24,6 +27,9 @@ func Load() (*Config, error) {
 		JWTSecret:         os.Getenv("JWT_SECRET"),
 		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
 		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
+		StockServiceURL:   getEnv("STOCK_SERVICE_URL", "http://stock-service:8083"),
+		MenuServiceURL:    getEnv("MENU_SERVICE_URL", "http://menu-service:8085"),
+		ServiceAPIKey:     os.Getenv("SERVICE_API_KEY"),
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
 		RabbitMQURL:       os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
 	}
@@ -32,6 +38,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.JWTSecret == "" {
 		return nil, fmt.Errorf("JWT_SECRET is required")
+	}
+	if cfg.ServiceAPIKey == "" {
+		return nil, fmt.Errorf("SERVICE_API_KEY is required")
 	}
 	return cfg, nil
 }

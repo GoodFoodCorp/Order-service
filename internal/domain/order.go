@@ -62,6 +62,7 @@ type Order struct {
 	ConfirmedAt      *time.Time
 	PromoCode        *string
 	DiscountCents    int64
+	StockSync        StockSyncState
 }
 
 type NewOrderItemInput struct {
@@ -96,6 +97,10 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		if in.MenuItemID == "" || strings.TrimSpace(in.MenuItemName) == "" {
 			return nil, NewValidationError("each item requires a menu item id and name")
 		}
+		menuItemID, err := uuid.Parse(strings.TrimSpace(in.MenuItemID))
+		if err != nil {
+			return nil, NewValidationError("menu item id must be a valid UUID")
+		}
 		if in.Quantity <= 0 {
 			return nil, NewValidationError("item quantity must be greater than zero")
 		}
@@ -106,7 +111,7 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		orderItems = append(orderItems, OrderItem{
 			ID:                  uuid.NewString(),
 			OrderID:             orderID,
-			MenuItemID:          in.MenuItemID,
+			MenuItemID:          menuItemID.String(), // canonical lowercase, as menu-service keys recipes
 			MenuItemName:        strings.TrimSpace(in.MenuItemName),
 			Quantity:            in.Quantity,
 			UnitPriceCents:      in.UnitPriceCents,
@@ -123,6 +128,7 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		DeliveryAddress:  strings.TrimSpace(deliveryAddress),
 		Items:            orderItems,
 		PlacedAt:         time.Now().UTC(),
+		StockSync:        StockSyncNone,
 	}, nil
 }
 

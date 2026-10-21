@@ -117,6 +117,24 @@ paths:
               },
           }
         "403": { description: Not a customer }
+        "409":
+          {
+            description: "Out of stock (OUT_OF_STOCK): a tracked ingredient of the restaurant is insufficient; the message names the dish and the ingredient (e.g. 'Stock insuffisant pour « Burger » : Steak (besoin 2 pièce, disponible 1)'). The order is not created.",
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
+        "503":
+          {
+            description: "Service unavailable (SERVICE_UNAVAILABLE): menu-service (recipes) or stock-service could not be reached; generic message, the cause is only logged. The order is not created.",
+            content:
+              {
+                application/json:
+                  { schema: { $ref: "#/components/schemas/Error" } },
+              },
+          }
     get:
       tags: [Orders]
       summary: List customer order history (own orders; admin may pass any customerId)
@@ -209,6 +227,7 @@ paths:
                   { schema: { $ref: "#/components/schemas/Order" } },
               },
           }
+        "409": { description: The order was cancelled (or changed) while its payment was being confirmed }
         "502": { description: Payment not completed }
   /api/orders/{id}/status:
     patch:
@@ -240,4 +259,4 @@ paths:
                   { schema: { $ref: "#/components/schemas/Order" } },
               },
           }
-        "409": { description: Invalid lifecycle transition }
+        "409": { description: Invalid lifecycle transition, or the order changed concurrently (retry) }

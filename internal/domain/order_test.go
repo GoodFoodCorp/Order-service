@@ -52,19 +52,19 @@ func TestNewOrder(t *testing.T) {
 		{
 			name:       "zero quantity",
 			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
-			items:   []NewOrderItemInput{{MenuItemID: "m1", MenuItemName: "Burger", Quantity: 0, UnitPriceCents: 100}},
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 0, UnitPriceCents: 100}},
 			wantErr: true,
 		},
 		{
 			name:       "negative price",
 			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
-			items:   []NewOrderItemInput{{MenuItemID: "m1", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: -5}},
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: -5}},
 			wantErr: true,
 		},
 		{
 			name:       "item without name",
 			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
-			items:   []NewOrderItemInput{{MenuItemID: "m1", MenuItemName: " ", Quantity: 1, UnitPriceCents: 100}},
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: " ", Quantity: 1, UnitPriceCents: 100}},
 			wantErr: true,
 		},
 	}
@@ -146,4 +146,10 @@ func TestOrderOwnership(t *testing.T) {
 	order := &Order{CustomerID: "user-1"}
 	assert.True(t, order.IsOwnedBy("user-1"))
 	assert.False(t, order.IsOwnedBy("user-2"))
+}
+
+func TestNewOrder_starts_with_stock_sync_none(t *testing.T) {
+	o, err := NewOrder("c1", "r1", "12 rue de Paris", validItems())
+	require.NoError(t, err)
+	assert.Equal(t, StockSyncNone, o.StockSync)
 }

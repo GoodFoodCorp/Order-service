@@ -13,6 +13,8 @@ const (
 	ErrCodeInvalidTransition ErrorCode = "INVALID_STATUS_TRANSITION"
 	ErrCodePayment           ErrorCode = "PAYMENT_ERROR"
 	ErrCodeConflict          ErrorCode = "CONFLICT"
+	ErrCodeOutOfStock        ErrorCode = "OUT_OF_STOCK"
+	ErrCodeUnavailable       ErrorCode = "SERVICE_UNAVAILABLE"
 )
 
 type Error struct {
@@ -47,4 +49,12 @@ func NewPaymentError(msg string) *Error {
 
 func NewConflictError(msg string) *Error {
 	return &Error{Code: ErrCodeConflict, Message: msg}
+}
+
+func NewOutOfStockError(msg string) *Error {
+	return &Error{Code: ErrCodeOutOfStock, Message: msg}
+}
+
+func NewUnavailableError(msg string) *Error {
+	return &Error{Code: ErrCodeUnavailable, Message: msg}
 }

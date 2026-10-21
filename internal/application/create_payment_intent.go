@@ -37,7 +37,7 @@ func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderI
 		if err := order.TransitionTo(domain.StatusPaymentPending); err != nil {
 			return nil, err
 		}
-		if err := uc.orders.UpdateStatus(ctx, order); err != nil {
+		if err := uc.orders.UpdateStatus(ctx, order, domain.StatusPlaced); err != nil {
 			return nil, err
 		}
 	}

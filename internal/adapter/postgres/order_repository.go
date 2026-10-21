@@ -26,11 +26,11 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
 		order.ID, order.CustomerID, order.RestaurantID, order.Status,
 		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt,
-		order.PromoCode, order.DiscountCents)
+		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync))
 	if err != nil {
 		return err
 	}
@@ -50,10 +50,10 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE id = $1`, id).
 		Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents)
+			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.NewNotFoundError("order not found")
 	}
@@ -71,13 +71,13 @@ func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order
 
 func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC`, customerID)
 }
 
 func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
 }
 
@@ -87,25 +87,121 @@ func (r *OrderRepository) ListByStatuses(ctx context.Context, statuses ...domain
 		raw[i] = string(s)
 	}
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
 		 FROM orders WHERE status = ANY($1) ORDER BY placed_at ASC`, raw)
 }
 
-func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order) error {
+// errConcurrentChange is returned when a guarded status write found the order
+// in another status than the one the use case read.
+func errConcurrentChange() error {
+	return domain.NewConflictError("order changed concurrently, retry")
+}
+
+func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order, from domain.OrderStatus) error {
 	tag, err := r.pool.Exec(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3`,
-		order.Status, order.ConfirmedAt, order.ID)
+		`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3 AND status = $4`,
+		order.Status, order.ConfirmedAt, order.ID, from)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return domain.NewNotFoundError("order not found")
+	if tag.RowsAffected() > 0 {
+		return nil
 	}
+	current, err := r.currentStatus(ctx, order.ID)
+	if err != nil {
+		return err
+	}
+	if current == order.Status {
+		return nil // a concurrent identical update already applied it
+	}
+	return errConcurrentChange()
+}
+
+func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState) (bool, error) {
+	// Guarded on PAYMENT_PENDING, the only legal predecessor of CONFIRMED: a
+	// late duplicate confirmation can never reset a cancelled (and restored)
+	// order to CONFIRMED|CONSUME_PENDING.
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3
+		 WHERE id = $4 AND status = 'PAYMENT_PENDING'`,
+		order.Status, order.ConfirmedAt, string(stockSync), order.ID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order) error {
+	// Restorability is computed from the row itself, not from the status the
+	// use case read: in an UPDATE, the SET expressions see the pre-update row
+	// (re-evaluated on the latest version under concurrent writes), so a
+	// confirmation that committed after the read is still restored. The WHERE
+	// keeps the lifecycle rule (only these statuses may be cancelled).
+	var state domain.StockSyncState
+	err := r.pool.QueryRow(ctx,
+		`UPDATE orders SET status = 'CANCELLED',
+		   stock_sync = CASE
+		     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+		      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
+		     ELSE stock_sync END
+		 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+		 RETURNING stock_sync, confirmed_at`,
+		order.ID).Scan(&state, &order.ConfirmedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, err := r.currentStatus(ctx, order.ID); err != nil {
+			return err
+		}
+		return errConcurrentChange()
+	}
+	if err != nil {
+		return err
+	}
+	order.Status = domain.StatusCancelled
+	order.StockSync = state
 	return nil
 }
 
-func (r *OrderRepository) list(ctx context.Context, query string, arg any) ([]domain.Order, error) {
-	rows, err := r.pool.Query(ctx, query, arg)
+// currentStatus re-reads the persisted status after a guarded write matched no
+// row, to tell a missing order from a concurrent change.
+func (r *OrderRepository) currentStatus(ctx context.Context, id string) (domain.OrderStatus, error) {
+	var status domain.OrderStatus
+	err := r.pool.QueryRow(ctx, `SELECT status FROM orders WHERE id = $1`, id).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", domain.NewNotFoundError("order not found")
+	}
+	return status, err
+}
+
+func (r *OrderRepository) UpdateStockSync(ctx context.Context, orderID string, from, to domain.StockSyncState) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET stock_sync = $3 WHERE id = $1 AND stock_sync = $2`,
+		orderID, string(from), string(to))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *OrderRepository) ListByStockSync(ctx context.Context, states []domain.StockSyncState, limit int) ([]domain.Order, error) {
+	values := make([]string, len(states))
+	for i, s := range states {
+		values[i] = string(s)
+	}
+	return r.list(ctx,
+		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		 FROM orders WHERE stock_sync = ANY($1) ORDER BY placed_at ASC LIMIT $2`, values, limit)
+}
+
+// stockSyncOrNone defaults an unset state to NONE (the column is NOT NULL).
+func stockSyncOrNone(s domain.StockSyncState) domain.StockSyncState {
+	if s == "" {
+		return domain.StockSyncNone
+	}
+	return s
+}
+
+func (r *OrderRepository) list(ctx context.Context, query string, args ...any) ([]domain.Order, error) {
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +212,7 @@ func (r *OrderRepository) list(ctx context.Context, query string, arg any) ([]do
 		var o domain.Order
 		if err := rows.Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status,
 			&o.TotalAmountCents, &o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt,
-			&o.PromoCode, &o.DiscountCents); err != nil {
+			&o.PromoCode, &o.DiscountCents, &o.StockSync); err != nil {
 			return nil, err
 		}
 		orders = append(orders, o)

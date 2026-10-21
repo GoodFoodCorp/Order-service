@@ -40,10 +40,18 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 		return nil, domain.NewForbiddenError("you are not allowed to update order status")
 	}
 
+	previous := order.Status
 	if err := order.TransitionTo(target); err != nil {
 		return nil, err
 	}
-	if err := uc.orders.UpdateStatus(ctx, order); err != nil {
+	if target == domain.StatusCancelled {
+		// The repository decides restorability from the persisted row, so a
+		// confirmation committed after our read is still restored.
+		if err := uc.orders.CancelWithStockSync(ctx, order); err != nil {
+			return nil, err
+		}
+		uc.restoreStock(ctx, order)
+	} else if err := uc.orders.UpdateStatus(ctx, order, previous); err != nil {
 		return nil, err
 	}
 	if target == domain.StatusReadyForPickup {
