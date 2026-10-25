@@ -73,9 +73,10 @@ type NewOrderItemInput struct {
 	SpecialInstructions string
 }
 
-// NewOrder builds a valid PLACED order and computes its total.
-// Prices come from the client for this POC (static catalog in the web app);
-// a future menu-service would be the price authority.
+// NewOrder builds a valid PLACED order and computes its total from the
+// prices it is given. Those come from the client, so they are only provisional:
+// PlaceOrder passes the order through the MenuCatalog (Reprice) before it is
+// persisted, and the catalog's prices are the ones that are charged.
 func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrderItemInput) (*Order, error) {
 	if customerID == "" {
 		return nil, NewValidationError("customer id is required")
@@ -130,6 +131,33 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		PlacedAt:         time.Now().UTC(),
 		StockSync:        StockSyncNone,
 	}, nil
+}
+
+// Reprice replaces the name and unit price of every line with the catalog's and
+// recomputes the subtotal. The lines must be the order's own (same dishes, same
+// quantities, same order) — only money and label change, never what was asked
+// for. On any mismatch the order is left untouched.
+func (o *Order) Reprice(priced []OrderItem) error {
+	if len(priced) != len(o.Items) {
+		return NewValidationError("priced lines do not match the order")
+	}
+	var total int64
+	for i, p := range priced {
+		cur := o.Items[i]
+		if p.MenuItemID != cur.MenuItemID || p.Quantity != cur.Quantity {
+			return NewValidationError("priced lines do not match the order")
+		}
+		if p.UnitPriceCents <= 0 || strings.TrimSpace(p.MenuItemName) == "" {
+			return NewValidationError("the catalog returned an invalid price for " + cur.MenuItemName)
+		}
+		total += int64(p.Quantity) * p.UnitPriceCents
+	}
+	for i, p := range priced {
+		o.Items[i].MenuItemName = strings.TrimSpace(p.MenuItemName)
+		o.Items[i].UnitPriceCents = p.UnitPriceCents
+	}
+	o.TotalAmountCents = total
+	return nil
 }
 
 // CanTransitionTo reports whether the lifecycle allows moving to target.

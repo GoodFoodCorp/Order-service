@@ -66,13 +66,16 @@ func main() {
 		log.Warn().Msg("RABBITMQ_URL not set: order events are not published")
 	}
 
+	// menu-service is both the recipe source (stock) and the price authority.
+	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey)
 	uc := application.NewUseCases(
 		postgres.NewOrderRepository(pool),
 		paymentclient.New(cfg.PaymentServiceURL),
 		promoclient.New(cfg.PromoServiceURL),
 		events,
-		menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey),
+		menu,
 		stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
+		menu,
 	)
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")

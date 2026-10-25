@@ -73,3 +73,13 @@ type PromoService interface {
 	// Idempotent per orderID: retries never double-consume.
 	Redeem(ctx context.Context, token, code, orderID string, orderAmountCents int64) (int64, error)
 }
+
+// MenuCatalog is the price authority. What the browser sends is never trusted
+// for money: before an order is created, its lines go through the catalog.
+type MenuCatalog interface {
+	// PriceItems returns the same lines (same dishes, same quantities) carrying
+	// the catalog's own name and unit price for this restaurant. A dish that
+	// cannot be ordered there (unknown, unavailable, hidden) is a validation
+	// error naming it; any other error means the prices could not be verified.
+	PriceItems(ctx context.Context, restaurantID string, items []OrderItem) ([]OrderItem, error)
+}

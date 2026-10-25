@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 
 	zlog "github.com/rs/zerolog/log"
 
@@ -19,8 +20,13 @@ type PlaceOrderInput struct {
 	PromoCode       string
 }
 
-// PlaceOrder creates a PLACED order for the acting customer. Before anything
-// else, the ingredients required by the dishes that have a recipe are checked
+// priceUnverifiableMessage is customer-facing: the underlying cause is logged.
+const priceUnverifiableMessage = "Impossible de vérifier les prix pour le moment, veuillez réessayer dans quelques instants."
+
+// PlaceOrder creates a PLACED order for the acting customer. The prices the
+// client sent are discarded: every line is priced by the menu catalog, and a
+// dish that is not orderable at this restaurant refuses the whole order. Then
+// the ingredients required by the dishes that have a recipe are checked
 // against stock-service (read only: quantities are consumed on confirmation).
 // A promo code, if
 // given, is only previewed here (never consumed) — it is redeemed for real
@@ -31,6 +37,9 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 	}
 	order, err := domain.NewOrder(actor.UserID, in.RestaurantID, in.DeliveryAddress, in.Items)
 	if err != nil {
+		return nil, err
+	}
+	if err := uc.priceFromCatalog(ctx, order); err != nil {
 		return nil, err
 	}
 	if err := uc.checkStock(ctx, order); err != nil {
@@ -49,6 +58,26 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 		return nil, err
 	}
 	return order, nil
+}
+
+// priceFromCatalog replaces the client's prices with the catalog's. It fails
+// closed: if the catalog cannot be reached the order is refused rather than
+// accepted at unverified prices.
+func (uc *UseCases) priceFromCatalog(ctx context.Context, order *domain.Order) error {
+	priced, err := uc.catalog.PriceItems(ctx, order.RestaurantID, order.Items)
+	if err != nil {
+		var de *domain.Error
+		if errors.As(err, &de) {
+			return err // e.g. "dish X is not available": meant for the customer
+		}
+		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("price lookup failed")
+		return domain.NewUnavailableError(priceUnverifiableMessage)
+	}
+	if err := order.Reprice(priced); err != nil {
+		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("catalog returned unusable prices")
+		return domain.NewUnavailableError(priceUnverifiableMessage)
+	}
+	return nil
 }
 
 // checkStock refuses the order when a tracked ingredient is short. Dishes

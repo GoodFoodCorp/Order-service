@@ -9,7 +9,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"goodfood/order-service/internal/domain"
 )
@@ -23,7 +27,10 @@ type Client struct {
 	http       *http.Client
 }
 
-var _ domain.RecipeService = (*Client)(nil)
+var (
+	_ domain.RecipeService = (*Client)(nil)
+	_ domain.MenuCatalog   = (*Client)(nil)
+)
 
 func New(baseURL, serviceKey string) *Client {
 	return &Client{baseURL: baseURL, serviceKey: serviceKey, http: &http.Client{Timeout: 10 * time.Second}}
@@ -110,4 +117,76 @@ func (c *Client) lookupChunk(ctx context.Context, restaurantID string, ids []str
 		out[menuItemID] = stock
 	}
 	return nil
+}
+
+// ── Price authority ─────────────────────────────────────────
+
+// menuEntry is the part of a menu-service dish that decides whether and at
+// what price it can be ordered.
+type menuEntry struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	PriceCents      int64  `json:"price_cents"`
+	Available       bool   `json:"available"`
+	HiddenForViewer bool   `json:"hidden_for_viewer"`
+}
+
+// PriceItems prices an order's lines from the restaurant's public menu — the
+// same list its customers browse, which already includes head-office (global)
+// dishes and leaves out those this restaurant has hidden.
+func (c *Client) PriceItems(ctx context.Context, restaurantID string, items []domain.OrderItem) ([]domain.OrderItem, error) {
+	menu, err := c.restaurantMenu(ctx, restaurantID)
+	if err != nil {
+		return nil, err
+	}
+
+	priced := make([]domain.OrderItem, 0, len(items))
+	for _, item := range items {
+		dish, ok := menu[canonicalID(item.MenuItemID)]
+		if !ok || !dish.Available || dish.HiddenForViewer {
+			return nil, domain.NewValidationError(fmt.Sprintf("« %s » n'est pas disponible dans ce restaurant", item.MenuItemName))
+		}
+		if dish.PriceCents <= 0 {
+			return nil, fmt.Errorf("menu-service returned a non-positive price for dish %s", dish.ID)
+		}
+		item.MenuItemName = dish.Name
+		item.UnitPriceCents = dish.PriceCents
+		priced = append(priced, item)
+	}
+	return priced, nil
+}
+
+func (c *Client) restaurantMenu(ctx context.Context, restaurantID string) (map[string]menuEntry, error) {
+	endpoint := c.baseURL + "/api/menu?restaurantId=" + url.QueryEscape(restaurantID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("menu-service request: %w", err)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("menu-service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("menu-service returned %d", resp.StatusCode)
+	}
+
+	var entries []menuEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return nil, fmt.Errorf("invalid menu-service response: %w", err)
+	}
+	menu := make(map[string]menuEntry, len(entries))
+	for _, e := range entries {
+		menu[canonicalID(e.ID)] = e
+	}
+	return menu, nil
+}
+
+// canonicalID is the lowercase hyphenated form orders store (see NewOrder),
+// so ids compare equal however menu-service happens to spell them.
+func canonicalID(id string) string {
+	if parsed, err := uuid.Parse(strings.TrimSpace(id)); err == nil {
+		return parsed.String()
+	}
+	return strings.ToLower(strings.TrimSpace(id))
 }

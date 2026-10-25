@@ -153,3 +153,63 @@ func TestNewOrder_starts_with_stock_sync_none(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, StockSyncNone, o.StockSync)
 }
+
+// ── Reprice: the catalog, not the client, is the price authority ───────────
+
+func TestRepriceReplacesClientPricesAndRecomputesTheTotal(t *testing.T) {
+	order, err := NewOrder("cust-1", "resto-1", "12 rue de Paris", []NewOrderItemInput{
+		{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1},
+		{MenuItemID: "22222222-2222-4222-8222-222222222222", MenuItemName: "Soda", Quantity: 3, UnitPriceCents: 1},
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(5), order.TotalAmountCents, "the claimed prices, before repricing")
+
+	priced := []OrderItem{
+		{MenuItemID: order.Items[0].MenuItemID, MenuItemName: "Burger Deluxe", Quantity: 2, UnitPriceCents: 1299},
+		{MenuItemID: order.Items[1].MenuItemID, MenuItemName: "Soda", Quantity: 3, UnitPriceCents: 300},
+	}
+	require.NoError(t, order.Reprice(priced))
+
+	assert.Equal(t, int64(2*1299+3*300), order.TotalAmountCents)
+	assert.Equal(t, int64(1299), order.Items[0].UnitPriceCents)
+	assert.Equal(t, "Burger Deluxe", order.Items[0].MenuItemName)
+	assert.NotEmpty(t, order.Items[0].ID, "line ids are kept")
+}
+
+func TestRepriceRefusesLinesThatDoNotMatchTheOrder(t *testing.T) {
+	newOrder := func() *Order {
+		o, err := NewOrder("cust-1", "resto-1", "12 rue de Paris", []NewOrderItemInput{
+			{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299},
+		})
+		require.NoError(t, err)
+		return o
+	}
+	good := func(o *Order) OrderItem {
+		return OrderItem{MenuItemID: o.Items[0].MenuItemID, MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299}
+	}
+
+	o := newOrder()
+	assert.Error(t, o.Reprice(nil), "no lines")
+
+	o = newOrder()
+	extra := good(o)
+	assert.Error(t, o.Reprice([]OrderItem{good(o), extra}), "an extra line")
+
+	o = newOrder()
+	other := good(o)
+	other.MenuItemID = "99999999-9999-4999-8999-999999999999"
+	assert.Error(t, o.Reprice([]OrderItem{other}), "a different dish")
+
+	o = newOrder()
+	moreQty := good(o)
+	moreQty.Quantity = 5
+	assert.Error(t, o.Reprice([]OrderItem{moreQty}), "the quantity is the customer's, not the catalog's")
+
+	o = newOrder()
+	free := good(o)
+	free.UnitPriceCents = 0
+	assert.Error(t, o.Reprice([]OrderItem{free}), "a free dish is a catalog bug, never charge 0")
+
+	o = newOrder()
+	assert.Equal(t, int64(2*1299), o.TotalAmountCents, "a refused reprice leaves the order untouched")
+}

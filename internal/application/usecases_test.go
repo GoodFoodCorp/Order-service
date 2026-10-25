@@ -340,6 +340,15 @@ func (f *fakeStock) Restore(ctx context.Context, orderID, restaurantID string) e
 	return f.restoreErr
 }
 
+// echoCatalog prices every line at what it already says: it keeps the older
+// tests (which are about stock, promos, lifecycle…) independent of pricing.
+// The pricing rules themselves are tested with strictCatalog.
+type echoCatalog struct{}
+
+func (echoCatalog) PriceItems(_ context.Context, _ string, items []domain.OrderItem) ([]domain.OrderItem, error) {
+	return items, nil
+}
+
 // ── Test fixtures ───────────────────────────────────────────
 
 var (
@@ -354,7 +363,7 @@ func setup() (*UseCases, *fakeOrderRepo, *fakePayments, *fakePromos) {
 	orders := newFakeOrderRepo()
 	payments := newFakePayments()
 	promos := newFakePromos()
-	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}, newFakeRecipes(), newFakeStock()), orders, payments, promos
+	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}, newFakeRecipes(), newFakeStock(), echoCatalog{}), orders, payments, promos
 }
 
 // setupStock builds use cases whose recipes/stock fakes the test can drive.
@@ -363,7 +372,7 @@ func setupStock() (*UseCases, *fakeOrderRepo, *fakePromos, *fakeRecipes, *fakeSt
 	promos := newFakePromos()
 	recipes := newFakeRecipes()
 	stock := newFakeStock()
-	return NewUseCases(orders, newFakePayments(), promos, domain.NoopPublisher{}, recipes, stock), orders, promos, recipes, stock
+	return NewUseCases(orders, newFakePayments(), promos, domain.NoopPublisher{}, recipes, stock, echoCatalog{}), orders, promos, recipes, stock
 }
 
 func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
@@ -911,7 +920,7 @@ func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReady
 }
 
 func setupWithPublisher(pub domain.EventPublisher) *UseCases {
-	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub, newFakeRecipes(), newFakeStock())
+	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub, newFakeRecipes(), newFakeStock(), echoCatalog{})
 }
 
 func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
