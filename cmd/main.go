@@ -125,7 +125,8 @@ func runStockRetry(ctx context.Context, log zerolog.Logger, uc *application.UseC
 			return
 		case <-timer.C:
 			n := uc.RetryStockSync(ctx, stockRetryBatch)
-			log.Debug().Int("processed", n).Msg("stock sync retry pass done")
+			r := uc.RetryRefunds(ctx, stockRetryBatch)
+			log.Debug().Int("stock", n).Int("refunds", r).Msg("sync retry pass done")
 			timer.Reset(stockRetryInterval)
 		}
 	}

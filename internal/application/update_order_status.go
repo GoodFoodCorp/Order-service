@@ -47,15 +47,10 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 	// The event goes to the outbox with the change itself: a status change is
 	// never committed without its event, nor an event sent for a rolled-back
 	// change.
-	event := domain.NewOrderEvent(order)
 	if target == domain.StatusCancelled {
-		// The repository decides restorability from the persisted row, so a
-		// confirmation committed after our read is still restored.
-		if err := uc.orders.CancelWithStockSync(ctx, order, event); err != nil {
-			return nil, err
-		}
-		uc.restoreStock(ctx, order)
-	} else if err := uc.orders.UpdateStatus(ctx, order, previous, event); err != nil {
+		return uc.cancel(ctx, order)
+	}
+	if err := uc.orders.UpdateStatus(ctx, order, previous, domain.NewOrderEvent(order)); err != nil {
 		return nil, err
 	}
 	return order, nil

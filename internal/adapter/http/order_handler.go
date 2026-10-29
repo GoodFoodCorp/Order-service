@@ -114,6 +114,16 @@ func (h *OrderHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toOrderResponse(order))
 }
 
+// POST /api/orders/{id}/cancel  (the customer cancels their own order)
+func (h *OrderHandler) Cancel(w http.ResponseWriter, r *http.Request) {
+	order, err := h.uc.CancelMyOrder(r.Context(), actorFrom(r), chi.URLParam(r, "id"))
+	if err != nil {
+		writeDomainError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toOrderResponse(order))
+}
+
 // PATCH /api/orders/{id}/status
 func (h *OrderHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	var req updateStatusRequest

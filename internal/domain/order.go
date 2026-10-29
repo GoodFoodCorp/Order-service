@@ -65,6 +65,9 @@ type Order struct {
 	StockSync        StockSyncState
 	// CourierID is the courier who claimed the delivery (nil until then).
 	CourierID *string
+	// RefundSync tracks paying back (or closing the intent of) a cancelled
+	// order with payment-service.
+	RefundSync RefundSyncState
 }
 
 type NewOrderItemInput struct {
@@ -132,6 +135,7 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		Items:            orderItems,
 		PlacedAt:         time.Now().UTC(),
 		StockSync:        StockSyncNone,
+		RefundSync:       RefundSyncNone,
 	}, nil
 }
 
@@ -218,3 +222,23 @@ func (o *Order) IsClaimableByCourier() bool { return claimableByCourier[o.Status
 func (o *Order) IsAssignedTo(courierID string) bool {
 	return o.CourierID != nil && *o.CourierID == courierID
 }
+
+// RefundSyncState tracks where a cancelled order stands with payment-service.
+type RefundSyncState string
+
+const (
+	RefundSyncNone    RefundSyncState = "NONE"
+	RefundSyncPending RefundSyncState = "PENDING"
+	RefundSyncDone    RefundSyncState = "DONE"
+)
+
+// customerCancellable are the statuses in which customers may cancel their
+// own order: until the kitchen starts cooking.
+var customerCancellable = map[OrderStatus]bool{
+	StatusPlaced:         true,
+	StatusPaymentPending: true,
+	StatusConfirmed:      true,
+}
+
+// IsCancellableByCustomer reports whether the customer may still cancel.
+func (o *Order) IsCancellableByCustomer() bool { return customerCancellable[o.Status] }

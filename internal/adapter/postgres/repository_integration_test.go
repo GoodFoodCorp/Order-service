@@ -138,3 +138,39 @@ func TestStatusChangesWriteTheirEventAtomically(t *testing.T) {
 		t.Fatalf("cancelled events = %d, want 1", n)
 	}
 }
+
+func TestCancellationMarksRefundPendingFromPaymentOn(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	cases := map[domain.OrderStatus]domain.RefundSyncState{
+		domain.StatusPlaced:         domain.RefundSyncNone,
+		domain.StatusPaymentPending: domain.RefundSyncPending,
+		domain.StatusConfirmed:      domain.RefundSyncPending,
+	}
+	for status, want := range cases {
+		order := newStoredOrder(t, repo, status)
+		order.Status = domain.StatusCancelled
+		if err := repo.CancelWithStockSync(ctx, order, nil); err != nil {
+			t.Fatal(err)
+		}
+		if order.RefundSync != want {
+			t.Fatalf("%s: refund_sync = %s, want %s", status, order.RefundSync, want)
+		}
+		if want == domain.RefundSyncPending {
+			pending, err := repo.ListByRefundSync(ctx, domain.RefundSyncPending, 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, o := range pending {
+				found = found || o.ID == order.ID
+			}
+			if !found {
+				t.Fatalf("%s: order not listed as pending refund", status)
+			}
+			if applied, _ := repo.UpdateRefundSync(ctx, order.ID, domain.RefundSyncPending, domain.RefundSyncDone); !applied {
+				t.Fatal("refund completion not applied")
+			}
+		}
+	}
+}
