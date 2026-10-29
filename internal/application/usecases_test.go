@@ -171,6 +171,10 @@ func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order, 
 		(stored.StockSync == domain.StockSyncConsumed || stored.StockSync == domain.StockSyncConsumePending) {
 		stored.StockSync = domain.StockSyncRestorePending
 	}
+	if stored.Status != domain.StatusPlaced {
+		stored.RefundSync = domain.RefundSyncPending
+	}
+	o.RefundSync = stored.RefundSync
 	stored.Status = domain.StatusCancelled
 	o.Status = domain.StatusCancelled
 	o.StockSync = stored.StockSync
@@ -211,6 +215,25 @@ func (f *fakeOrderRepo) ListByStockSync(_ context.Context, states []domain.Stock
 			break
 		}
 		out = append(out, *o)
+	}
+	return out, nil
+}
+
+func (f *fakeOrderRepo) UpdateRefundSync(_ context.Context, orderID string, from, to domain.RefundSyncState) (bool, error) {
+	stored, ok := f.orders[orderID]
+	if !ok || stored.RefundSync != from {
+		return false, nil
+	}
+	stored.RefundSync = to
+	return true, nil
+}
+
+func (f *fakeOrderRepo) ListByRefundSync(_ context.Context, state domain.RefundSyncState, limit int) ([]domain.Order, error) {
+	out := []domain.Order{}
+	for _, o := range f.orders {
+		if o.RefundSync == state && len(out) < limit {
+			out = append(out, *o)
+		}
 	}
 	return out, nil
 }
@@ -1864,4 +1887,101 @@ func TestUpdateStatusForCourierAppliesCourierRules(t *testing.T) {
 	updated, err := uc.UpdateStatusForCourier(context.Background(), order.ID, "liv-1", domain.StatusInDelivery)
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusInDelivery, updated.Status)
+}
+
+// ── Refunds and customer cancellation ───────────────────────
+
+func storedOrder(t *testing.T, orders *fakeOrderRepo, id string) *domain.Order {
+	t.Helper()
+	o, err := orders.GetByID(context.Background(), id)
+	require.NoError(t, err)
+	return o
+}
+
+func TestCancellingAPaidOrderRefundsItAndFreesThePromo(t *testing.T) {
+	uc, orders, payments, promos := setup()
+	promos.codes["WELCOME10"] = 10
+	order, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{
+		RestaurantID: "resto-1", DeliveryAddress: "12 rue de Paris", PromoCode: "WELCOME10",
+		Items: []domain.NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 1000}},
+	})
+	require.NoError(t, err)
+	payAndConfirm(t, uc, order.ID)
+
+	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{order.ID}, payments.refunds)
+	assert.Equal(t, []string{order.ID}, promos.released)
+	assert.Equal(t, domain.RefundSyncDone, storedOrder(t, orders, order.ID).RefundSync)
+}
+
+func TestCancellingAnUnpaidOrderNeedsNoRefund(t *testing.T) {
+	uc, orders, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+
+	_, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+
+	require.NoError(t, err)
+	assert.Empty(t, payments.refunds)
+	assert.Equal(t, domain.RefundSyncNone, storedOrder(t, orders, order.ID).RefundSync)
+}
+
+func TestCancellingDuringPaymentClosesTheIntent(t *testing.T) {
+	uc, _, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+
+	_, err = uc.CancelMyOrder(context.Background(), customer, order.ID)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{order.ID}, payments.refunds, "payment-service closes the intent so it can never be charged")
+}
+
+func TestFailedRefundIsRetriedByTheWorker(t *testing.T) {
+	uc, orders, payments, _ := setup()
+	order := confirmOrder(t, uc)
+	payments.refundErr = errors.New("payment-service down")
+
+	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+	require.NoError(t, err, "the cancellation itself succeeds")
+	assert.Equal(t, domain.RefundSyncPending, storedOrder(t, orders, order.ID).RefundSync)
+
+	payments.refundErr = nil
+	assert.Equal(t, 1, uc.RetryRefunds(context.Background(), 10))
+	assert.Equal(t, domain.RefundSyncDone, storedOrder(t, orders, order.ID).RefundSync)
+	assert.Equal(t, 0, uc.RetryRefunds(context.Background(), 10))
+}
+
+func TestRefundOfAnOrderWithoutPaymentIsDone(t *testing.T) {
+	uc, orders, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+	orders.orders[order.ID].Status = domain.StatusPaymentPending // intent creation never reached payment-service
+
+	_, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+
+	require.NoError(t, err)
+	assert.Empty(t, payments.created)
+	assert.Equal(t, domain.RefundSyncDone, storedOrder(t, orders, order.ID).RefundSync)
+}
+
+func TestCustomerCancellationRules(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := confirmOrder(t, uc)
+
+	_, err := uc.CancelMyOrder(context.Background(), otherCust, order.ID)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
+
+	orders.orders[order.ID].Status = domain.StatusInPreparation
+	_, err = uc.CancelMyOrder(context.Background(), customer, order.ID)
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeConflict, derr.Code, "too late once the kitchen started")
+
+	orders.orders[order.ID].Status = domain.StatusConfirmed
+	cancelled, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusCancelled, cancelled.Status)
 }

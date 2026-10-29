@@ -11,12 +11,12 @@ import (
 )
 
 // orderCols lists the order columns every read selects, in orderDest order.
-const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id`
+const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync`
 
 // orderDest returns the scan destinations matching orderCols.
 func orderDest(o *domain.Order) []any {
 	return []any{&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID}
+		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync}
 }
 
 type OrderRepository struct {
@@ -175,10 +175,13 @@ func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain
 			   stock_sync = CASE
 			     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
 			      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
-			     ELSE stock_sync END
+			     ELSE stock_sync END,
+			   refund_sync = CASE
+			     WHEN status IN ('PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP') THEN 'PENDING'
+			     ELSE refund_sync END
 			 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
-			 RETURNING stock_sync, confirmed_at`,
-			order.ID).Scan(&state, &order.ConfirmedAt)
+			 RETURNING stock_sync, refund_sync, confirmed_at`,
+			order.ID).Scan(&state, &order.RefundSync, &order.ConfirmedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
@@ -303,4 +306,18 @@ func (r *OrderRepository) UnassignCourier(ctx context.Context, orderID, courierI
 		`UPDATE orders SET courier_id = NULL WHERE id = $1 AND courier_id = $2 AND status IN ('IN_PREPARATION', 'READY_FOR_PICKUP')`,
 		orderID, courierID)
 	return err
+}
+
+func (r *OrderRepository) UpdateRefundSync(ctx context.Context, orderID string, from, to domain.RefundSyncState) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET refund_sync = $3 WHERE id = $1 AND refund_sync = $2`, orderID, string(from), string(to))
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *OrderRepository) ListByRefundSync(ctx context.Context, state domain.RefundSyncState, limit int) ([]domain.Order, error) {
+	return r.list(ctx,
+		`SELECT `+orderCols+` FROM orders WHERE refund_sync = $1 ORDER BY placed_at ASC LIMIT $2`, string(state), limit)
 }

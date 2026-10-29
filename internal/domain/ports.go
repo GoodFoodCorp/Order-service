@@ -25,7 +25,8 @@ type OrderRepository interface {
 	// nothing was written — the caller re-reads the order.
 	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState, event *Event) (applied bool, err error)
 	// CancelWithStockSync cancels the order if its persisted status still allows
-	// it, deciding the stock outcome from the row's own pre-update values (not
+	// it, sets refund_sync to PENDING when a payment may exist (from
+	// PAYMENT_PENDING on), and deciding the stock outcome from the row's own pre-update values (not
 	// from the caller's possibly stale read): a paid order (CONFIRMED,
 	// IN_PREPARATION, READY_FOR_PICKUP) whose stock_sync is CONSUMED or
 	// CONSUME_PENDING moves to RESTORE_PENDING. order.StockSync and
@@ -38,6 +39,10 @@ type OrderRepository interface {
 	// ListByStockSync returns at most limit orders in one of the given states,
 	// oldest first (used by the retry worker).
 	ListByStockSync(ctx context.Context, states []StockSyncState, limit int) ([]Order, error)
+	// UpdateRefundSync is a compare-and-set on refund_sync.
+	UpdateRefundSync(ctx context.Context, orderID string, from, to RefundSyncState) (applied bool, err error)
+	// ListByRefundSync returns at most limit orders in that state, oldest first.
+	ListByRefundSync(ctx context.Context, state RefundSyncState, limit int) ([]Order, error)
 	// AssignCourier sets the courier of a claimable order, only if it has none
 	// yet (or already this one). applied=false means another courier, or a
 	// status change, won.
