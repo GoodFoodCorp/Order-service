@@ -2,10 +2,6 @@ package application
 
 import (
 	"context"
-	"time"
-
-	"github.com/google/uuid"
-	zlog "github.com/rs/zerolog/log"
 
 	"goodfood/order-service/internal/domain"
 )
@@ -48,34 +44,19 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 	if err := order.TransitionTo(target); err != nil {
 		return nil, err
 	}
+	// The event goes to the outbox with the change itself: a status change is
+	// never committed without its event, nor an event sent for a rolled-back
+	// change.
+	event := domain.NewOrderEvent(order)
 	if target == domain.StatusCancelled {
 		// The repository decides restorability from the persisted row, so a
 		// confirmation committed after our read is still restored.
-		if err := uc.orders.CancelWithStockSync(ctx, order); err != nil {
+		if err := uc.orders.CancelWithStockSync(ctx, order, event); err != nil {
 			return nil, err
 		}
 		uc.restoreStock(ctx, order)
-	} else if err := uc.orders.UpdateStatus(ctx, order, previous); err != nil {
+	} else if err := uc.orders.UpdateStatus(ctx, order, previous, event); err != nil {
 		return nil, err
 	}
-	if target == domain.StatusReadyForPickup {
-		uc.publishOrderReady(ctx, order)
-	}
 	return order, nil
-}
-
-// publishOrderReady is best-effort: the status change is already committed,
-// and delivery-service's REST sync recovers any lost event.
-func (uc *UseCases) publishOrderReady(ctx context.Context, order *domain.Order) {
-	event := domain.OrderReadyEvent{
-		EventID:         uuid.NewString(),
-		OrderID:         order.ID,
-		CustomerID:      order.CustomerID,
-		RestaurantID:    order.RestaurantID,
-		DeliveryAddress: order.DeliveryAddress,
-		OccurredAt:      time.Now().UTC(),
-	}
-	if err := uc.events.PublishOrderReady(ctx, event); err != nil {
-		zlog.Warn().Err(err).Str("order_id", order.ID).Msg("could not publish order.ready_for_pickup")
-	}
 }

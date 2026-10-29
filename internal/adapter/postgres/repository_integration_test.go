@@ -97,3 +97,44 @@ func TestAssignCourierIsACompareAndSet(t *testing.T) {
 		t.Fatal("a CONFIRMED order is not claimable yet")
 	}
 }
+
+func countEvents(t *testing.T, repo *OrderRepository, orderID, routingKey string) int {
+	t.Helper()
+	var n int
+	err := repo.pool.QueryRow(context.Background(),
+		`SELECT count(*) FROM outbox_events WHERE routing_key = $1 AND payload->'data'->>'orderId' = $2`,
+		routingKey, orderID).Scan(&n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestStatusChangesWriteTheirEventAtomically(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	order := newStoredOrder(t, repo, domain.StatusInPreparation)
+
+	order.Status = domain.StatusReadyForPickup
+	if err := repo.UpdateStatus(ctx, order, domain.StatusInPreparation, domain.NewOrderEvent(order)); err != nil {
+		t.Fatal(err)
+	}
+	// A stale writer still believing IN_PREPARATION: no-op, and no event.
+	if err := repo.UpdateStatus(ctx, order, domain.StatusInPreparation, domain.NewOrderEvent(order)); err != nil {
+		t.Fatal(err)
+	}
+	if n := countEvents(t, repo, order.ID, domain.EventOrderReadyForPickup); n != 1 {
+		t.Fatalf("ready events = %d, want 1", n)
+	}
+
+	order.Status = domain.StatusCancelled
+	if err := repo.CancelWithStockSync(ctx, order, domain.NewOrderEvent(order)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CancelWithStockSync(ctx, order, domain.NewOrderEvent(order)); err == nil {
+		t.Fatal("a second cancellation must be refused")
+	}
+	if n := countEvents(t, repo, order.ID, "order.cancelled"); n != 1 {
+		t.Fatalf("cancelled events = %d, want 1", n)
+	}
+}

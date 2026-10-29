@@ -36,7 +36,6 @@ type UseCases struct {
 	orders   domain.OrderRepository
 	payments domain.PaymentService
 	promos   domain.PromoService
-	events   domain.EventPublisher
 	recipes  domain.RecipeService
 	stock    domain.StockService
 	catalog  domain.MenuCatalog
@@ -47,16 +46,12 @@ type Deps struct {
 	Orders   domain.OrderRepository
 	Payments domain.PaymentService
 	Promos   domain.PromoService
-	Events   domain.EventPublisher
 	Recipes  domain.RecipeService
 	Stock    domain.StockService
 	Catalog  domain.MenuCatalog
 }
 
 func NewUseCases(d Deps) *UseCases {
-	if d.Events == nil {
-		d.Events = domain.NoopPublisher{}
-	}
-	return &UseCases{orders: d.Orders, payments: d.Payments, promos: d.Promos, events: d.Events,
+	return &UseCases{orders: d.Orders, payments: d.Payments, promos: d.Promos,
 		recipes: d.Recipes, stock: d.Stock, catalog: d.Catalog}
 }

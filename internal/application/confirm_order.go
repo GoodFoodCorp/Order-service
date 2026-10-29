@@ -56,7 +56,7 @@ func (uc *UseCases) confirmPaidOrder(ctx context.Context, order *domain.Order) (
 	// leave a paid order unconfirmed or untracked.
 	persistCtx, cancel := detached(ctx)
 	defer cancel()
-	applied, err := uc.orders.ConfirmWithStockSync(persistCtx, order, domain.StockSyncConsumePending)
+	applied, err := uc.orders.ConfirmWithStockSync(persistCtx, order, domain.StockSyncConsumePending, domain.NewOrderEvent(order))
 	if err != nil {
 		return nil, err
 	}
