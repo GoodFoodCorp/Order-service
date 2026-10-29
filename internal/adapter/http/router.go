@@ -18,6 +18,7 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 	r := chi.NewRouter()
 
 	r.Use(chimw.Recoverer)
+	r.Use(chimw.Compress(5))
 	r.Use(RequestID)
 	r.Use(Logger(log))
 

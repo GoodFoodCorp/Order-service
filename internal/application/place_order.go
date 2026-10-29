@@ -18,7 +18,13 @@ type PlaceOrderInput struct {
 	DeliveryAddress string
 	Items           []domain.NewOrderItemInput
 	PromoCode       string
+	// IdempotencyKey (Idempotency-Key header) protects against double
+	// submission: the same key always yields the same order.
+	IdempotencyKey string
 }
+
+// maxIdempotencyKeyLength bounds what a client may store with its order.
+const maxIdempotencyKeyLength = 128
 
 // priceUnverifiableMessage is customer-facing: the underlying cause is logged.
 const priceUnverifiableMessage = "Impossible de vérifier les prix pour le moment, veuillez réessayer dans quelques instants."
@@ -35,9 +41,23 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 	if !actor.HasRole(RoleUser) {
 		return nil, domain.NewForbiddenError("only customers can place orders")
 	}
+	if len(in.IdempotencyKey) > maxIdempotencyKeyLength {
+		return nil, domain.NewValidationError("idempotency key is too long")
+	}
+	if in.IdempotencyKey != "" {
+		if existing, err := uc.orders.GetByIdempotencyKey(ctx, actor.UserID, in.IdempotencyKey); err == nil {
+			return existing, nil
+		} else if !isDomainError(err, domain.ErrCodeNotFound) {
+			return nil, err
+		}
+	}
 	order, err := domain.NewOrder(actor.UserID, in.RestaurantID, in.DeliveryAddress, in.Items)
 	if err != nil {
 		return nil, err
+	}
+	if in.IdempotencyKey != "" {
+		key := in.IdempotencyKey
+		order.IdempotencyKey = &key
 	}
 	if err := uc.priceFromCatalog(ctx, order); err != nil {
 		return nil, err
@@ -55,6 +75,10 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 		}
 	}
 	if err := uc.orders.Create(ctx, order); err != nil {
+		if order.IdempotencyKey != nil && isDomainError(err, domain.ErrCodeConflict) {
+			// A concurrent retry with the same key won the race.
+			return uc.orders.GetByIdempotencyKey(ctx, actor.UserID, *order.IdempotencyKey)
+		}
 		return nil, err
 	}
 	return order, nil

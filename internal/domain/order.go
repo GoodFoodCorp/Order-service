@@ -68,6 +68,9 @@ type Order struct {
 	// RefundSync tracks paying back (or closing the intent of) a cancelled
 	// order with payment-service.
 	RefundSync RefundSyncState
+	// IdempotencyKey, when the client sent one, makes a retried creation
+	// return this order instead of placing a second one.
+	IdempotencyKey *string
 }
 
 type NewOrderItemInput struct {
@@ -242,3 +245,30 @@ var customerCancellable = map[OrderStatus]bool{
 
 // IsCancellableByCustomer reports whether the customer may still cancel.
 func (o *Order) IsCancellableByCustomer() bool { return customerCancellable[o.Status] }
+
+// ListFilter bounds a list query: a page and, optionally, the statuses kept.
+type ListFilter struct {
+	Statuses []OrderStatus
+	Limit    int
+	Offset   int
+}
+
+// Page sizes of the list endpoints.
+const (
+	DefaultPageSize = 50
+	MaxPageSize     = 200
+)
+
+// NewListFilter clamps a requested page to the allowed bounds.
+func NewListFilter(limit, offset int, statuses []OrderStatus) ListFilter {
+	if limit <= 0 {
+		limit = DefaultPageSize
+	}
+	if limit > MaxPageSize {
+		limit = MaxPageSize
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return ListFilter{Statuses: statuses, Limit: limit, Offset: offset}
+}

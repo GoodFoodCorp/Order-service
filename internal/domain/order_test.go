@@ -213,3 +213,13 @@ func TestRepriceRefusesLinesThatDoNotMatchTheOrder(t *testing.T) {
 	o = newOrder()
 	assert.Equal(t, int64(2*1299), o.TotalAmountCents, "a refused reprice leaves the order untouched")
 }
+
+func TestNewListFilterClampsThePage(t *testing.T) {
+	f := NewListFilter(0, -5, nil)
+	if f.Limit != DefaultPageSize || f.Offset != 0 {
+		t.Fatalf("got %+v", f)
+	}
+	if f := NewListFilter(10_000, 20, []OrderStatus{StatusConfirmed}); f.Limit != MaxPageSize || f.Offset != 20 || len(f.Statuses) != 1 {
+		t.Fatalf("got %+v", f)
+	}
+}
