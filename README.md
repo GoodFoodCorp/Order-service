@@ -52,23 +52,41 @@ sont la **source de vérité unique** du domaine.
   `promo-service` à la création, puis **réellement consommé** seulement après
   succès du paiement (dans `confirm`), pour ne jamais brûler une utilisation
   sur un panier abandonné
-- **Consulter une commande** : le client propriétaire, le franchisé du restaurant,
-  le livreur ou le siège
-- **Historique des commandes** d'un client
-- **Liste des commandes d'un restaurant** (portail franchisé)
-- **Créer une intention de paiement** — délègue à `payment-service` en transmettant
-  le JWT du client, puis passe la commande en `PAYMENT_PENDING`
+- **Livraison ou click & collect** (`fulfillment` = `DELIVERY` | `PICKUP`) :
+  à la création, `franchise-service` donne un **devis** — restaurant ouvert,
+  commandes non suspendues, adresse dans la zone — avec les **frais de
+  livraison**, le **minimum de commande** et le **délai estimé**, enregistrés
+  sur la commande. Refus explicite sinon (`400`). Un retrait n'a ni adresse ni
+  frais et n'est jamais proposé aux livreurs.
+- **Pourboire** (`tip_cents`, 0 à 100 €) ajouté au montant dû
+- **Montant dû** = sous-total − remise + frais de livraison + pourboire
+- **Création idempotente** : en-tête `Idempotency-Key` (unique par client) —
+  un double clic ne crée qu'une commande
+- **Consulter une commande** : le client propriétaire, le franchisé du
+  restaurant, le **livreur assigné** ou le siège
+- **Historique** d'un client et **commandes d'un restaurant**, paginés
+  (`limit`/`offset`, 50 par défaut, 200 max, filtre `status=A,B`, en-tête
+  `X-Next-Offset`)
+- **Annulation par le client** (`POST /{id}/cancel`) tant que la cuisine n'a
+  pas commencé ; toute annulation d'une commande payée est **remboursée**
+- **Créer une intention de paiement** — via l'API interne de `payment-service`
+  (`X-Service-Key`) pour **le montant calculé ici** ; le client choisit au plus
+  une carte enregistrée. Passe la commande en `PAYMENT_PENDING`
 - **Contrôle du stock à la commande** — les recettes des plats sont lues dans
   `menu-service`, puis les ingrédients cumulés sont vérifiés auprès de
   `stock-service` : une commande dont un ingrédient suivi manque est refusée
   (`409`, le message nomme le plat et l'ingrédient). Les plats sans recette ne
   sont pas contrôlés.
-- **Confirmer la commande** après vérification du paiement auprès de
-  `payment-service` — idempotent ; les ingrédients sont alors **consommés**
-  dans `stock-service`, et **restitués** si la commande payée est annulée
+- **Confirmer la commande** : le paiement est relu chez `payment-service`
+  (réconcilié avec Stripe) et doit être `SUCCEEDED` pour **exactement** le
+  montant dû, le client et la devise de la commande. Déclenchée par le client
+  ou par l'événement `payment.succeeded` (webhook Stripe) — idempotente ; les
+  ingrédients sont alors **consommés**, et **restitués** si la commande payée
+  est annulée
 - **Changer le statut** : le franchisé sur son restaurant, le siège partout, le
-  livreur uniquement pour `IN_DELIVERY` et `DELIVERED`
-- **Lister les commandes prêtes à livrer** — consommé par `delivery-service`
+  livreur **assigné** uniquement pour `IN_DELIVERY` et `DELIVERED`
+- **API interne pour `delivery-service`** : commandes à attribuer, assignation
+  exclusive du livreur (compare-and-set), transitions au nom du livreur
 
 ### Cycle de vie d'une commande
 
@@ -94,12 +112,38 @@ prévue est refusée (`409`) et l'état reste inchangé.
 | POST | `/api/orders` | `user` |
 | GET | `/api/orders?customerId=` | `user` (soi-même), `admin` |
 | GET | `/api/orders?restaurantId=` | `manager` (le sien), `admin` |
-| GET | `/api/orders/ready-for-delivery` | `livreur`, `admin` |
-| GET | `/api/orders/{id}` | propriétaire, franchisé du resto, livreur, `admin` |
-| POST | `/api/orders/{id}/payment-intent` | `user` (propriétaire) |
+| GET | `/api/orders/ready-for-delivery` | `admin` |
+| GET | `/api/orders/{id}` | propriétaire, franchisé du resto, livreur assigné, `admin` |
+| POST | `/api/orders/{id}/payment-intent` | `user` (propriétaire) — `{payment_method_id?}` |
 | POST | `/api/orders/{id}/confirm` | `user` (propriétaire), `admin` |
-| PATCH | `/api/orders/{id}/status` | `manager` (le sien), `admin`, `livreur` (limité) |
-| GET | `/healthz`, `/readyz` | public (sondes) |
+| POST | `/api/orders/{id}/cancel` | `user` (propriétaire, avant préparation) |
+| PATCH | `/api/orders/{id}/status` | `manager` (le sien), `admin`, livreur assigné (limité) |
+| GET | `/internal/orders/ready-for-delivery` | `X-Service-Key` (delivery-service) |
+| GET | `/internal/orders/{id}` | `X-Service-Key` |
+| PUT | `/internal/orders/{id}/courier` | `X-Service-Key` — `{courier_id}` |
+| DELETE | `/internal/orders/{id}/courier/{courierId}` | `X-Service-Key` |
+| PATCH | `/internal/orders/{id}/status` | `X-Service-Key` — `{status, courier_id}` |
+| GET | `/healthz`, `/readyz`, `/metrics` | sondes et Prometheus (hors ingress pour `/metrics`) |
+
+### Événements (RabbitMQ `goodfood.events`, outbox transactionnelle)
+
+Chaque changement de cycle de vie publie `order.<statut>` (`order.confirmed`,
+`order.in_preparation`, `order.ready_for_pickup`, `order.in_delivery`,
+`order.delivered`, `order.cancelled`), écrit **dans la même transaction** que
+le changement puis relayé avec confirmations du broker (au moins une fois,
+`FOR UPDATE SKIP LOCKED`). Données : `orderId`, `customerId`, `restaurantId`,
+`status`, `deliveryAddress`, `amountDueCents`, `courierId`, `fulfillment`,
+`tipCents`, `dropoffLat/Lng`.
+
+Consommé : `payment.succeeded` (file `order-service.payment-events`, DLQ
+`.dlq`) — confirme la commande ; échec transitoire = relivraison.
+
+### Résilience
+
+Les appels sortants passent par un client commun : timeout par cible, pool de
+connexions, `X-Request-ID` propagé, **circuit breaker** (ouvert après 5 échecs
+consécutifs, 15 s). Le worker de reprise (stock + remboursements) prend un
+**verrou consultatif PostgreSQL** : un seul réplica l'exécute à la fois.
 
 ---
 
@@ -115,7 +159,9 @@ prévue est refusée (`409`) et l'état reste inchangé.
 | **payment-service** | 🟠 | **Le paiement est impossible** : `payment-intent` et `confirm` renvoient `502`. Le reste fonctionne : création de commande, consultation, historique, changements de statut par le franchisé. Une commande reste bloquée en `PLACED`. |
 | **menu-service** | 🔴 | **Aucune commande ne peut être passée** : la lecture des recettes (`POST /internal/recipes/lookup`) a lieu à chaque `POST /api/orders`, qui renvoie `503` (message générique) si elle échoue. Consultation, paiement et changements de statut des commandes existantes continuent ; la consommation de stock d'une commande confirmée est différée (reprise par le worker). |
 | **stock-service** | 🟠 | **Les commandes contenant un plat avec recette sont refusées** (`503`, message générique) car le stock ne peut pas être vérifié (`/internal/stocks/check`) ; les commandes sans plat suivi passent. La consommation (`consume`) à la confirmation et la restitution (`restore`) à l'annulation sont différées et rejouées par le worker. |
-| **promo-service** | 🟡 | Un `promo_code` envoyé à la création est refusé (`400`) ; une commande sans code fonctionne normalement. Aucun impact sur les commandes déjà passées. |
+| **promo-service** | 🟡 | Un `promo_code` envoyé à la création est refusé (`400`) ; une commande sans code fonctionne normalement. Une consommation échouée après paiement est journalisée sans bloquer la confirmation. |
+| **franchise-service** | 🟠 | Si `FRANCHISE_SERVICE_URL` est défini et que le service est injoignable, les nouvelles commandes sont refusées (`503`) : les frais de livraison font partie du prix. |
+| **RabbitMQ** | 🟡 | Les événements restent dans l'outbox ; la confirmation repose sur le parcours client |
 | **auth-service** | 🟠 | Aucun appel réseau, mais toutes les routes exigent un jeton valide |
 
 ### Qui dépend de ce service
@@ -127,6 +173,13 @@ prévue est refusée (`409`) et l'état reste inchangé.
 
 **Sans lien** : `reservation-service`, `user-service` et `franchise-service`
 fonctionnent indépendamment.
+
+### Remboursements (worker)
+
+Une annulation à partir de `PAYMENT_PENDING` écrit `refund_sync = PENDING` dans
+la même requête ; le remboursement (ou la fermeture de l'intention non payée)
+est demandé à `payment-service`, puis l'utilisation du code promo est rendue.
+En cas d'échec, le worker rejoue le remboursement à chaque passage.
 
 ### Synchronisation du stock (worker)
 
@@ -178,6 +231,8 @@ uniquement si un code promo est utilisé.
 | `JWT_ISSUER` / `JWT_AUDIENCE` | non | Défauts `goodfood-auth` / `goodfood-api` |
 | `PAYMENT_SERVICE_URL` | non | Défaut `http://payment-service:8086` |
 | `PROMO_SERVICE_URL` | non | Défaut `http://promo-service:8092` |
+| `FRANCHISE_SERVICE_URL` | non | Active horaires, zone et frais (devis interne) |
+| `RABBITMQ_URL` | non | Relais de l'outbox et consommation de `payment.succeeded` |
 | `STOCK_SERVICE_URL` | non | Défaut `http://stock-service:8083` |
 | `MENU_SERVICE_URL` | non | Défaut `http://menu-service:8085` |
 | `SERVICE_API_KEY` | oui | Secret des appels internes (en-tête `X-Service-Key`), **identique** à celui de `stock-service` et `menu-service` ; jamais loggé |
