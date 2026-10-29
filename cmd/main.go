@@ -15,13 +15,13 @@ import (
 	httpadapter "goodfood/order-service/internal/adapter/http"
 	"goodfood/order-service/internal/adapter/menuclient"
 	"goodfood/order-service/internal/adapter/messaging"
+	"goodfood/order-service/internal/adapter/outbox"
 	"goodfood/order-service/internal/adapter/paymentclient"
 	"goodfood/order-service/internal/adapter/postgres"
 	"goodfood/order-service/internal/adapter/promoclient"
 	"goodfood/order-service/internal/adapter/stockclient"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
-	"goodfood/order-service/internal/domain"
 )
 
 const (
@@ -56,23 +56,12 @@ func main() {
 	}
 	log.Info().Msg("migrations applied")
 
-	var events domain.EventPublisher = domain.NoopPublisher{}
-	if cfg.RabbitMQURL != "" {
-		publisher := messaging.NewAMQPPublisher(cfg.RabbitMQURL)
-		defer publisher.Close()
-		events = publisher
-		log.Info().Msg("order events published to rabbitmq")
-	} else {
-		log.Warn().Msg("RABBITMQ_URL not set: order events are not published")
-	}
-
 	// menu-service is both the recipe source (stock) and the price authority.
 	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey)
 	uc := application.NewUseCases(application.Deps{
 		Orders:   postgres.NewOrderRepository(pool),
 		Payments: paymentclient.New(cfg.PaymentServiceURL, cfg.ServiceAPIKey, nil),
 		Promos:   promoclient.New(cfg.PromoServiceURL, cfg.ServiceAPIKey, nil),
-		Events:   events,
 		Recipes:  menu,
 		Stock:    stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
 		Catalog:  menu,
@@ -92,6 +81,16 @@ func main() {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go runStockRetry(runCtx, log, uc)
+
+	if cfg.RabbitMQURL != "" {
+		publisher := messaging.NewAMQPPublisher(cfg.RabbitMQURL)
+		defer publisher.Close()
+		go outbox.NewRelay(postgres.NewOutboxRepository(pool), publisher, log).Run(runCtx)
+		go messaging.NewPaymentConsumer(cfg.RabbitMQURL, uc.HandlePaymentSucceeded, log).Run(runCtx)
+		log.Info().Msg("order events relayed to rabbitmq, payment events consumed")
+	} else {
+		log.Warn().Msg("RABBITMQ_URL not set: order events stay in the outbox, payments are confirmed by the customer flow only")
+	}
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

@@ -21,6 +21,8 @@ type fakeOrderRepo struct {
 	stockSyncErr error
 	// confirmWrites records each ConfirmWithStockSync call (one atomic write).
 	confirmWrites []confirmWrite
+	// events records what each status write put in the outbox.
+	events []*domain.Event
 	// beforeWrite, when set, runs once just before the next status write
 	// (UpdateStatus / ConfirmWithStockSync / CancelWithStockSync), after the
 	// use case has read the order: it simulates a concurrent request that
@@ -97,7 +99,7 @@ func (f *fakeOrderRepo) ListByStatuses(_ context.Context, statuses ...domain.Ord
 // UpdateStatus mirrors the guarded SQL: it writes only while the stored
 // status equals from; on a mismatch, an already-applied target is a no-op and
 // anything else a conflict.
-func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order, from domain.OrderStatus) error {
+func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order, from domain.OrderStatus, event *domain.Event) error {
 	f.interleave()
 	stored, ok := f.orders[o.ID]
 	if !ok {
@@ -111,12 +113,27 @@ func (f *fakeOrderRepo) UpdateStatus(_ context.Context, o *domain.Order, from do
 	}
 	stored.Status = o.Status
 	stored.ConfirmedAt = o.ConfirmedAt
+	f.record(event)
 	return nil
+}
+
+func (f *fakeOrderRepo) record(event *domain.Event) {
+	if event != nil {
+		f.events = append(f.events, event)
+	}
+}
+
+func (f *fakeOrderRepo) eventTypes() []string {
+	out := []string{}
+	for _, e := range f.events {
+		out = append(out, e.Type)
+	}
+	return out
 }
 
 // ConfirmWithStockSync mirrors `WHERE id = $4 AND status = 'PAYMENT_PENDING'`:
 // zero rows (missing or other status) is applied=false, nothing written.
-func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order, state domain.StockSyncState) (bool, error) {
+func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order, state domain.StockSyncState, event *domain.Event) (bool, error) {
 	f.interleave()
 	stored, ok := f.orders[o.ID]
 	if !ok || stored.Status != domain.StatusPaymentPending {
@@ -126,6 +143,7 @@ func (f *fakeOrderRepo) ConfirmWithStockSync(_ context.Context, o *domain.Order,
 	stored.ConfirmedAt = o.ConfirmedAt
 	stored.StockSync = state
 	f.confirmWrites = append(f.confirmWrites, confirmWrite{o.Status, state})
+	f.record(event)
 	return true, nil
 }
 
@@ -140,7 +158,7 @@ var stockRestorableStatuses = map[domain.OrderStatus]bool{
 // CancelWithStockSync mirrors the SQL: guarded on a cancellable stored status,
 // restorability computed from the stored (pre-update) status and stock_sync,
 // RETURNING stock_sync and confirmed_at.
-func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order) error {
+func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order, event *domain.Event) error {
 	f.interleave()
 	stored, ok := f.orders[o.ID]
 	if !ok {
@@ -157,6 +175,7 @@ func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order) 
 	o.Status = domain.StatusCancelled
 	o.StockSync = stored.StockSync
 	o.ConfirmedAt = stored.ConfirmedAt
+	f.record(event)
 	return nil
 }
 
@@ -1025,61 +1044,94 @@ func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
 	}
 }
 
-// ── EventPublisher ──────────────────────────────────────────
+// ── Outbox events ───────────────────────────────────────────
 
-type fakePublisher struct {
-	events []domain.OrderReadyEvent
-	err    error
-}
-
-func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReadyEvent) error {
-	f.events = append(f.events, e)
-	return f.err
-}
-
-func setupWithPublisher(pub domain.EventPublisher) *UseCases {
-	return NewUseCases(Deps{Orders: newFakeOrderRepo(), Payments: newFakePayments(), Promos: newFakePromos(), Events: pub, Recipes: newFakeRecipes(), Stock: newFakeStock(), Catalog: echoCatalog{}})
-}
-
-func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
-	pub := &fakePublisher{}
-	uc := setupWithPublisher(pub)
+func TestEveryLifecycleChangeWritesItsEvent(t *testing.T) {
+	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 
 	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
 	require.NoError(t, err)
-	assert.Empty(t, pub.events, "no event before READY_FOR_PICKUP")
-
 	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
 	require.NoError(t, err)
-	require.Len(t, pub.events, 1)
-	got := pub.events[0]
-	assert.Equal(t, order.ID, got.OrderID)
-	assert.Equal(t, order.CustomerID, got.CustomerID)
-	assert.Equal(t, order.RestaurantID, got.RestaurantID)
-	assert.Equal(t, order.DeliveryAddress, got.DeliveryAddress)
-	assert.NotEmpty(t, got.EventID)
-	assert.False(t, got.OccurredAt.IsZero())
-
 	_, err = uc.AssignCourier(context.Background(), order.ID, courier.UserID)
 	require.NoError(t, err)
 	_, err = uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
 	require.NoError(t, err)
-	assert.Len(t, pub.events, 1, "no event for later transitions")
+
+	assert.Equal(t, []string{"order.confirmed", "order.in_preparation", "order.ready_for_pickup", "order.in_delivery"},
+		orders.eventTypes(), "PAYMENT_PENDING is technical and publishes nothing")
+
+	ready := orders.events[2]
+	assert.Equal(t, domain.EventOrderReadyForPickup, ready.Type)
+	assert.Equal(t, order.ID, ready.Data.OrderID)
+	assert.Equal(t, order.CustomerID, ready.Data.CustomerID)
+	assert.Equal(t, order.RestaurantID, ready.Data.RestaurantID)
+	assert.Equal(t, order.DeliveryAddress, ready.Data.DeliveryAddress)
+	assert.NotEmpty(t, ready.ID)
+	assert.False(t, ready.OccurredAt.IsZero())
+	require.NotNil(t, orders.events[3].Data.CourierID)
+	assert.Equal(t, courier.UserID, *orders.events[3].Data.CourierID)
 }
 
-func TestUpdateOrderStatusSucceedsWhenPublishFails(t *testing.T) {
-	pub := &fakePublisher{err: errors.New("broker down")}
-	uc := setupWithPublisher(pub)
+func TestCancellationWritesItsEvent(t *testing.T) {
+	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
-	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
-	require.NoError(t, err)
 
-	updated, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
 
 	require.NoError(t, err)
-	assert.Equal(t, domain.StatusReadyForPickup, updated.Status)
-	assert.Len(t, pub.events, 1)
+	assert.Equal(t, []string{"order.confirmed", "order.cancelled"}, orders.eventTypes())
+}
+
+func TestRejectedTransitionWritesNoEvent(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := confirmOrder(t, uc)
+
+	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusDelivered)
+
+	require.Error(t, err)
+	assert.Equal(t, []string{"order.confirmed"}, orders.eventTypes())
+}
+
+// ── payment.succeeded ───────────────────────────────────────
+
+func TestHandlePaymentSucceededConfirmsTheOrder(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := placeTestOrder(t, uc)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+
+	require.NoError(t, uc.HandlePaymentSucceeded(context.Background(), order.ID))
+	require.NoError(t, uc.HandlePaymentSucceeded(context.Background(), order.ID), "redelivery is harmless")
+
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusConfirmed, stored.Status)
+	assert.Equal(t, []string{"order.confirmed"}, orders.eventTypes())
+}
+
+func TestHandlePaymentSucceededRetriesWhenPaymentCannotBeVerified(t *testing.T) {
+	uc, _, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+	payments.status = "PENDING" // payment-service not caught up with the provider yet
+
+	assert.Error(t, uc.HandlePaymentSucceeded(context.Background(), order.ID))
+}
+
+func TestHandlePaymentSucceededIgnoresFinalRefusals(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := placeTestOrder(t, uc)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+	_, err = uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+	require.NoError(t, err)
+
+	assert.NoError(t, uc.HandlePaymentSucceeded(context.Background(), order.ID), "a cancelled order is final")
+	assert.NoError(t, uc.HandlePaymentSucceeded(context.Background(), "unknown-order"))
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusCancelled, stored.Status)
 }
 
 // ── Stock sync: consume after payment, restore on cancellation ──

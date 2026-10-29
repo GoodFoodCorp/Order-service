@@ -105,14 +105,38 @@ func errConcurrentChange() error {
 	return domain.NewConflictError("order changed concurrently, retry")
 }
 
-func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order, from domain.OrderStatus) error {
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3 AND status = $4`,
-		order.Status, order.ConfirmedAt, order.ID, from)
+// withEvent runs write in a transaction and, if it applied, records event
+// (when not nil) in the outbox before committing.
+func (r *OrderRepository) withEvent(ctx context.Context, event *domain.Event, write func(tx pgx.Tx) (bool, error)) (bool, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
+
+	applied, err := write(tx)
+	if err != nil || !applied {
+		return false, err
+	}
+	if event != nil {
+		if err := insertEvent(ctx, tx, event); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit(ctx)
+}
+
+func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order, from domain.OrderStatus, event *domain.Event) error {
+	applied, err := r.withEvent(ctx, event, func(tx pgx.Tx) (bool, error) {
+		tag, err := tx.Exec(ctx,
+			`UPDATE orders SET status = $1, confirmed_at = $2 WHERE id = $3 AND status = $4`,
+			order.Status, order.ConfirmedAt, order.ID, from)
+		return tag.RowsAffected() > 0, err
+	})
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() > 0 {
+	if applied {
 		return nil
 	}
 	current, err := r.currentStatus(ctx, order.ID)
@@ -125,44 +149,49 @@ func (r *OrderRepository) UpdateStatus(ctx context.Context, order *domain.Order,
 	return errConcurrentChange()
 }
 
-func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState) (bool, error) {
+func (r *OrderRepository) ConfirmWithStockSync(ctx context.Context, order *domain.Order, stockSync domain.StockSyncState, event *domain.Event) (bool, error) {
 	// Guarded on PAYMENT_PENDING, the only legal predecessor of CONFIRMED: a
 	// late duplicate confirmation can never reset a cancelled (and restored)
 	// order to CONFIRMED|CONSUME_PENDING.
-	tag, err := r.pool.Exec(ctx,
-		`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3
-		 WHERE id = $4 AND status = 'PAYMENT_PENDING'`,
-		order.Status, order.ConfirmedAt, string(stockSync), order.ID)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
+	return r.withEvent(ctx, event, func(tx pgx.Tx) (bool, error) {
+		tag, err := tx.Exec(ctx,
+			`UPDATE orders SET status = $1, confirmed_at = $2, stock_sync = $3
+			 WHERE id = $4 AND status = 'PAYMENT_PENDING'`,
+			order.Status, order.ConfirmedAt, string(stockSync), order.ID)
+		return tag.RowsAffected() > 0, err
+	})
 }
 
-func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order) error {
+func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain.Order, event *domain.Event) error {
 	// Restorability is computed from the row itself, not from the status the
 	// use case read: in an UPDATE, the SET expressions see the pre-update row
 	// (re-evaluated on the latest version under concurrent writes), so a
 	// confirmation that committed after the read is still restored. The WHERE
 	// keeps the lifecycle rule (only these statuses may be cancelled).
 	var state domain.StockSyncState
-	err := r.pool.QueryRow(ctx,
-		`UPDATE orders SET status = 'CANCELLED',
-		   stock_sync = CASE
-		     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
-		      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
-		     ELSE stock_sync END
-		 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
-		 RETURNING stock_sync, confirmed_at`,
-		order.ID).Scan(&state, &order.ConfirmedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
+	applied, err := r.withEvent(ctx, event, func(tx pgx.Tx) (bool, error) {
+		err := tx.QueryRow(ctx,
+			`UPDATE orders SET status = 'CANCELLED',
+			   stock_sync = CASE
+			     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+			      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
+			     ELSE stock_sync END
+			 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
+			 RETURNING stock_sync, confirmed_at`,
+			order.ID).Scan(&state, &order.ConfirmedAt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil, err
+	})
+	if err != nil {
+		return err
+	}
+	if !applied {
 		if _, err := r.currentStatus(ctx, order.ID); err != nil {
 			return err
 		}
 		return errConcurrentChange()
-	}
-	if err != nil {
-		return err
 	}
 	order.Status = domain.StatusCancelled
 	order.StockSync = state

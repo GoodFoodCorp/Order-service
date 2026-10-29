@@ -14,14 +14,16 @@ type OrderRepository interface {
 	// never regress or resurrect an order. If the row already holds the target
 	// status (a concurrent identical update) it succeeds without writing;
 	// otherwise a concurrent change yields a CONFLICT error.
-	UpdateStatus(ctx context.Context, order *Order, from OrderStatus) error
+	//
+	// event, when not nil, is written to the outbox in the same transaction.
+	UpdateStatus(ctx context.Context, order *Order, from OrderStatus, event *Event) error
 	// ConfirmWithStockSync writes the CONFIRMED status, confirmed_at and the
 	// stock_sync intent in one UPDATE, so a paid order is never left without
 	// a pending consumption. The write only applies while the persisted status
 	// is PAYMENT_PENDING (the only predecessor of CONFIRMED); applied=false
 	// means another request changed the order first (or it does not exist) and
 	// nothing was written — the caller re-reads the order.
-	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState) (applied bool, err error)
+	ConfirmWithStockSync(ctx context.Context, order *Order, stockSync StockSyncState, event *Event) (applied bool, err error)
 	// CancelWithStockSync cancels the order if its persisted status still allows
 	// it, deciding the stock outcome from the row's own pre-update values (not
 	// from the caller's possibly stale read): a paid order (CONFIRMED,
@@ -29,7 +31,7 @@ type OrderRepository interface {
 	// CONSUME_PENDING moves to RESTORE_PENDING. order.StockSync and
 	// order.ConfirmedAt are refreshed from the updated row. A missing order
 	// yields NOT_FOUND, a status that no longer allows cancelling a CONFLICT.
-	CancelWithStockSync(ctx context.Context, order *Order) error
+	CancelWithStockSync(ctx context.Context, order *Order, event *Event) error
 	// UpdateStockSync is a compare-and-set: stock_sync moves from -> to only if
 	// it currently equals from. applied=false (lost race) is not an error.
 	UpdateStockSync(ctx context.Context, orderID string, from, to StockSyncState) (applied bool, err error)
