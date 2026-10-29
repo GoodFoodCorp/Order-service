@@ -25,8 +25,11 @@ type Client struct {
 
 var _ domain.StockService = (*Client)(nil)
 
-func New(baseURL, serviceKey string) *Client {
-	return &Client{baseURL: baseURL, serviceKey: serviceKey, http: &http.Client{Timeout: 10 * time.Second}}
+func New(baseURL, serviceKey string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &Client{baseURL: baseURL, serviceKey: serviceKey, http: httpClient}
 }
 
 type lineDTO struct {

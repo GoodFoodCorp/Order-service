@@ -33,7 +33,7 @@ func serve(t *testing.T, status int, body string) (*Client, *http.Request) {
 		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
-	return New(srv.URL, "svc-key"), &got
+	return New(srv.URL, "svc-key", nil), &got
 }
 
 func line(id, name string, qty int, price int64) domain.OrderItem {
@@ -119,7 +119,7 @@ func TestPriceItemsFailsWhenMenuServiceFails(t *testing.T) {
 		})
 	}
 
-	c := New("http://127.0.0.1:1", "k")
+	c := New("http://127.0.0.1:1", "k", nil)
 	_, err := c.PriceItems(context.Background(), "resto-1", []domain.OrderItem{line(burgerID, "Burger", 1, 1299)})
 	require.Error(t, err, "unreachable")
 }

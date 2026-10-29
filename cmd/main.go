@@ -24,6 +24,7 @@ import (
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
 	"goodfood/order-service/internal/domain"
+	"goodfood/order-service/internal/platform/httpclient"
 )
 
 const (
@@ -59,20 +60,21 @@ func main() {
 	log.Info().Msg("migrations applied")
 
 	// menu-service is both the recipe source (stock) and the price authority.
-	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey)
+	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey, httpclient.New("menu-service", httpclient.Settings{}))
 	var restaurants domain.RestaurantService
 	if cfg.FranchiseServiceURL != "" {
-		restaurants = franchiseclient.New(cfg.FranchiseServiceURL, cfg.ServiceAPIKey, nil)
+		restaurants = franchiseclient.New(cfg.FranchiseServiceURL, cfg.ServiceAPIKey, httpclient.New("franchise-service", httpclient.Settings{}))
 		log.Info().Str("franchise_service", cfg.FranchiseServiceURL).Msg("opening hours, delivery zone and fees checked with franchise-service")
 	} else {
 		log.Warn().Msg("FRANCHISE_SERVICE_URL not set: opening hours, delivery zone and fees are not checked")
 	}
 	uc := application.NewUseCases(application.Deps{
 		Orders:   postgres.NewOrderRepository(pool),
-		Payments: paymentclient.New(cfg.PaymentServiceURL, cfg.ServiceAPIKey, nil),
-		Promos:   promoclient.New(cfg.PromoServiceURL, cfg.ServiceAPIKey, nil),
+		// Payments go through Stripe: a longer timeout than the other calls.
+		Payments: paymentclient.New(cfg.PaymentServiceURL, cfg.ServiceAPIKey, httpclient.New("payment-service", httpclient.Settings{Timeout: 15 * time.Second})),
+		Promos:   promoclient.New(cfg.PromoServiceURL, cfg.ServiceAPIKey, httpclient.New("promo-service", httpclient.Settings{})),
 		Recipes:  menu,
-		Stock:    stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
+		Stock:    stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey, httpclient.New("stock-service", httpclient.Settings{})),
 		Catalog:  menu,
 
 		Restaurants: restaurants,

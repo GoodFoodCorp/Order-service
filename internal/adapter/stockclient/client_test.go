@@ -37,7 +37,7 @@ func TestCheck(t *testing.T) {
 	srv := server(t, 200, `{"available":false,"missing":[{"stockItemId":"s1","name":"Tomate","unit":"kg","required":1.5,"onHand":0.5}]}`, &got)
 	defer srv.Close()
 
-	av, err := New(srv.URL, key).Check(context.Background(), "r1", lines)
+	av, err := New(srv.URL, key, nil).Check(context.Background(), "r1", lines)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestCheckAvailable(t *testing.T) {
 	var got captured
 	srv := server(t, 200, `{"available":true,"missing":[]}`, &got)
 	defer srv.Close()
-	av, err := New(srv.URL, key).Check(context.Background(), "r1", lines)
+	av, err := New(srv.URL, key, nil).Check(context.Background(), "r1", lines)
 	if err != nil || !av.Available || len(av.Missing) != 0 {
 		t.Errorf("av=%+v err=%v", av, err)
 	}
@@ -71,7 +71,7 @@ func TestConsume(t *testing.T) {
 	var got captured
 	srv := server(t, 200, `{"status":"APPLIED","shortfalls":[]}`, &got)
 	defer srv.Close()
-	if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+	if err := New(srv.URL, key, nil).Consume(context.Background(), "o1", "r1", lines); err != nil {
 		t.Fatal(err)
 	}
 	if got.method != "POST" || got.path != "/internal/stocks/consume" || got.key != key {
@@ -87,7 +87,7 @@ func TestRestore(t *testing.T) {
 	var got captured
 	srv := server(t, 200, `{"status":"RESTORED"}`, &got)
 	defer srv.Close()
-	if err := New(srv.URL, key).Restore(context.Background(), "o1", "r1"); err != nil {
+	if err := New(srv.URL, key, nil).Restore(context.Background(), "o1", "r1"); err != nil {
 		t.Fatal(err)
 	}
 	if got.method != "POST" || got.path != "/internal/stocks/restore" || got.key != key {
@@ -100,7 +100,7 @@ func TestRestore(t *testing.T) {
 
 func TestErrorStatuses(t *testing.T) {
 	c := func(url string) []func() error {
-		cl := New(url, key)
+		cl := New(url, key, nil)
 		ctx := context.Background()
 		return []func() error{
 			func() error { _, err := cl.Check(ctx, "r1", lines); return err },
@@ -137,7 +137,7 @@ func TestUnreachable(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
-	cl := New(url, key)
+	cl := New(url, key, nil)
 	ctx := context.Background()
 	if _, err := cl.Check(ctx, "r1", lines); err == nil {
 		t.Error("check: expected error")
@@ -174,7 +174,7 @@ func TestConsumeLogsDriftWithoutFailing(t *testing.T) {
 			srv := server(t, 200, tc.resp, &got)
 			defer srv.Close()
 
-			if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+			if err := New(srv.URL, key, nil).Consume(context.Background(), "o1", "r1", lines); err != nil {
 				t.Fatalf("consume must not fail on a 2xx: %v", err)
 			}
 			out := logs.String()
@@ -193,7 +193,7 @@ func TestConsumeAppliedDoesNotWarn(t *testing.T) {
 		logs := captureLogs(t)
 		var got captured
 		srv := server(t, 200, resp, &got)
-		if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+		if err := New(srv.URL, key, nil).Consume(context.Background(), "o1", "r1", lines); err != nil {
 			t.Fatal(err)
 		}
 		srv.Close()
@@ -209,7 +209,7 @@ func TestConsumeUnreadableSuccessBodyIsNotAnError(t *testing.T) {
 	srv := server(t, 200, `not json`, &got)
 	defer srv.Close()
 
-	if err := New(srv.URL, key).Consume(context.Background(), "o1", "r1", lines); err != nil {
+	if err := New(srv.URL, key, nil).Consume(context.Background(), "o1", "r1", lines); err != nil {
 		t.Fatalf("the consume was applied, an unreadable body must not trigger a retry: %v", err)
 	}
 	if !strings.Contains(logs.String(), `"order_id":"o1"`) {
