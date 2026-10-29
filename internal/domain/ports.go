@@ -36,6 +36,12 @@ type OrderRepository interface {
 	// ListByStockSync returns at most limit orders in one of the given states,
 	// oldest first (used by the retry worker).
 	ListByStockSync(ctx context.Context, states []StockSyncState, limit int) ([]Order, error)
+	// AssignCourier sets the courier of a claimable order, only if it has none
+	// yet (or already this one). applied=false means another courier, or a
+	// status change, won.
+	AssignCourier(ctx context.Context, orderID, courierID string) (applied bool, err error)
+	// UnassignCourier clears the courier if it is still this one.
+	UnassignCourier(ctx context.Context, orderID, courierID string) error
 }
 
 // PaymentIntentRequest asks payment-service to charge an order. The amount

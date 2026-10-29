@@ -22,11 +22,12 @@ var claimableStatuses = []domain.OrderStatus{
 	domain.StatusReadyForPickup,
 }
 
-// ListReadyForDelivery returns orders awaiting a courier. Consumed by the
-// delivery-service (polling, see ADR-003) and by couriers directly.
+// ListReadyForDelivery returns orders awaiting a courier, to head office.
+// Couriers see them through delivery-service, which exposes only what a
+// courier needs; delivery-service itself uses the internal API.
 func (uc *UseCases) ListReadyForDelivery(ctx context.Context, actor Actor) ([]domain.Order, error) {
-	if !actor.HasRole(RoleCourier) && !actor.HasRole(RoleAdmin) {
-		return nil, domain.NewForbiddenError("only couriers can list orders ready for delivery")
+	if !actor.HasRole(RoleAdmin) {
+		return nil, domain.NewForbiddenError("only head office can list every order awaiting a courier")
 	}
 	return uc.orders.ListByStatuses(ctx, claimableStatuses...)
 }

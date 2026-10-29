@@ -14,7 +14,7 @@ import (
 type HealthChecker func(ctx context.Context) error
 
 // NewRouter assembles middlewares and routes.
-func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
+func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.Recoverer)
@@ -50,6 +50,17 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, log zerolog.Logger, dbCh
 			r.Post("/{id}/confirm", handler.Confirm)
 			r.Patch("/{id}/status", handler.UpdateStatus)
 		})
+	})
+
+	// Service-to-service routes for delivery-service, never exposed by the
+	// ingress (/api only).
+	r.Route("/internal/orders", func(r chi.Router) {
+		r.Use(ServiceKey(serviceKey))
+		r.Get("/ready-for-delivery", handler.ListClaimableInternal)
+		r.Get("/{id}", handler.GetInternal)
+		r.Put("/{id}/courier", handler.AssignCourierInternal)
+		r.Delete("/{id}/courier/{courierId}", handler.UnassignCourierInternal)
+		r.Patch("/{id}/status", handler.UpdateStatusInternal)
 	})
 
 	return r

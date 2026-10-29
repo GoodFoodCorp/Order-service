@@ -30,6 +30,17 @@ type updateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// courierRequest identifies the courier delivery-service acts for.
+type courierRequest struct {
+	CourierID string `json:"courier_id"`
+}
+
+// courierStatusRequest is a delivery transition made on behalf of a courier.
+type courierStatusRequest struct {
+	Status    string `json:"status"`
+	CourierID string `json:"courier_id"`
+}
+
 // paymentIntentRequest optionally selects one of the customer's saved cards.
 // It deliberately has no amount: the order decides what is charged.
 type paymentIntentRequest struct {
@@ -63,6 +74,7 @@ type orderResponse struct {
 	Items            []orderItemResponse `json:"items"`
 	PlacedAt         time.Time           `json:"placed_at"`
 	ConfirmedAt      *time.Time          `json:"confirmed_at,omitempty"`
+	CourierID        *string             `json:"courier_id,omitempty"`
 }
 
 type paymentIntentResponse struct {
@@ -102,6 +114,7 @@ func toOrderResponse(o *domain.Order) orderResponse {
 		Items:            items,
 		PlacedAt:         o.PlacedAt,
 		ConfirmedAt:      o.ConfirmedAt,
+		CourierID:        o.CourierID,
 	}
 }
 

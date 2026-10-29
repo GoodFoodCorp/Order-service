@@ -63,6 +63,8 @@ type Order struct {
 	PromoCode        *string
 	DiscountCents    int64
 	StockSync        StockSyncState
+	// CourierID is the courier who claimed the delivery (nil until then).
+	CourierID *string
 }
 
 type NewOrderItemInput struct {
@@ -200,4 +202,19 @@ func (o *Order) ApplyPromo(code string, discountCents int64) error {
 	o.PromoCode = &code
 	o.DiscountCents = discountCents
 	return nil
+}
+
+// claimableByCourier are the statuses in which a courier may take an order
+// on: still cooking (they drive to the restaurant meanwhile) or ready.
+var claimableByCourier = map[OrderStatus]bool{
+	StatusInPreparation:  true,
+	StatusReadyForPickup: true,
+}
+
+// IsClaimableByCourier reports whether a courier may be assigned now.
+func (o *Order) IsClaimableByCourier() bool { return claimableByCourier[o.Status] }
+
+// IsAssignedTo reports whether the given courier runs this order's delivery.
+func (o *Order) IsAssignedTo(courierID string) bool {
+	return o.CourierID != nil && *o.CourierID == courierID
 }

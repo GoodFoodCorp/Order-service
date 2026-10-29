@@ -196,6 +196,22 @@ func (f *fakeOrderRepo) ListByStockSync(_ context.Context, states []domain.Stock
 	return out, nil
 }
 
+func (f *fakeOrderRepo) AssignCourier(_ context.Context, orderID, courierID string) (bool, error) {
+	stored, ok := f.orders[orderID]
+	if !ok || !stored.IsClaimableByCourier() || (stored.CourierID != nil && *stored.CourierID != courierID) {
+		return false, nil
+	}
+	stored.CourierID = &courierID
+	return true, nil
+}
+
+func (f *fakeOrderRepo) UnassignCourier(_ context.Context, orderID, courierID string) error {
+	if stored, ok := f.orders[orderID]; ok && stored.IsAssignedTo(courierID) && stored.IsClaimableByCourier() {
+		stored.CourierID = nil
+	}
+	return nil
+}
+
 // fakePayments stands in for payment-service (which owns Stripe).
 type fakePayments struct {
 	created     map[string]domain.PaymentIntentRequest
@@ -608,7 +624,7 @@ func TestGetOrderAccessRules(t *testing.T) {
 	}{
 		{"owner", customer, true},
 		{"admin", admin, true},
-		{"courier", courier, true},
+		{"courier not assigned to it", courier, false},
 		{"manager of the restaurant", manager, true},
 		{"manager of another restaurant", Actor{UserID: "mgr-2", TenantID: "resto-99", RoleSlugs: []string{RoleManager}}, false},
 		{"another customer", otherCust, false},
@@ -623,6 +639,23 @@ func TestGetOrderAccessRules(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestGetOrderVisibleToItsAssignedCourierOnly(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := confirmOrder(t, uc)
+	orders.orders[order.ID].Status = domain.StatusReadyForPickup
+	_, err := uc.AssignCourier(context.Background(), order.ID, courier.UserID)
+	require.NoError(t, err)
+
+	_, err = uc.GetOrder(context.Background(), courier, order.ID)
+	require.NoError(t, err)
+
+	otherCourier := Actor{UserID: "liv-2", RoleSlugs: []string{RoleCourier}}
+	_, err = uc.GetOrder(context.Background(), otherCourier, order.ID)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
 }
 
 func TestGetOrderNotFound(t *testing.T) {
@@ -892,12 +925,19 @@ func TestUpdateOrderStatusCourierLimits(t *testing.T) {
 	_, err := uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInPreparation)
 	require.Error(t, err)
 
-	// ...but can pick up and deliver once the order is ready.
+	// ...nor touch an order they did not claim...
 	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
 	require.NoError(t, err)
 	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
 	require.NoError(t, err)
+	_, err = uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
 
+	// ...but pick up and deliver the one assigned to them.
+	_, err = uc.AssignCourier(context.Background(), order.ID, courier.UserID)
+	require.NoError(t, err)
 	updated, err := uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusInDelivery, updated.Status)
@@ -935,14 +975,21 @@ func TestListReadyForDelivery(t *testing.T) {
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusReadyForPickup
 
-	list, err := uc.ListReadyForDelivery(context.Background(), courier)
+	list, err := uc.ListReadyForDelivery(context.Background(), admin)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
-	_, err = uc.ListReadyForDelivery(context.Background(), customer)
-	var derr *domain.Error
-	require.ErrorAs(t, err, &derr)
-	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
+	// Couriers see claimable orders through delivery-service only.
+	for _, actor := range []Actor{customer, courier} {
+		_, err = uc.ListReadyForDelivery(context.Background(), actor)
+		var derr *domain.Error
+		require.ErrorAs(t, err, &derr)
+		assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
+	}
+
+	internal, err := uc.ListClaimableOrders(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, internal, 1)
 }
 
 // A courier can claim an order that is still cooking, so the travel time to
@@ -953,7 +1000,7 @@ func TestListReadyForDeliveryIncludesOrdersStillInPreparation(t *testing.T) {
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusInPreparation
 
-	list, err := uc.ListReadyForDelivery(context.Background(), courier)
+	list, err := uc.ListReadyForDelivery(context.Background(), admin)
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, domain.StatusInPreparation, list[0].Status)
@@ -972,7 +1019,7 @@ func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
 		domain.StatusCancelled,
 	} {
 		stored.Status = s
-		list, err := uc.ListReadyForDelivery(context.Background(), courier)
+		list, err := uc.ListReadyForDelivery(context.Background(), admin)
 		require.NoError(t, err)
 		assert.Empty(t, list, "status %s must not be claimable", s)
 	}
@@ -1014,6 +1061,8 @@ func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
 	assert.NotEmpty(t, got.EventID)
 	assert.False(t, got.OccurredAt.IsZero())
 
+	_, err = uc.AssignCourier(context.Background(), order.ID, courier.UserID)
+	require.NoError(t, err)
 	_, err = uc.UpdateOrderStatus(context.Background(), courier, order.ID, domain.StatusInDelivery)
 	require.NoError(t, err)
 	assert.Len(t, pub.events, 1, "no event for later transitions")
@@ -1696,4 +1745,71 @@ func TestStatusUpdateAlreadyAppliedConcurrentlyIsNotAConflict(t *testing.T) {
 	require.NoError(t, err)
 	stored, _ := orders.GetByID(context.Background(), order.ID)
 	assert.Equal(t, domain.StatusPaymentPending, stored.Status)
+}
+
+// ── Courier assignment (delivery-service internal API) ──────
+
+func readyOrder(t *testing.T, uc *UseCases, orders *fakeOrderRepo) *domain.Order {
+	t.Helper()
+	order := confirmOrder(t, uc)
+	orders.orders[order.ID].Status = domain.StatusReadyForPickup
+	return order
+}
+
+func TestAssignCourierIsExclusiveAndIdempotent(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := readyOrder(t, uc, orders)
+
+	assigned, err := uc.AssignCourier(context.Background(), order.ID, "liv-1")
+	require.NoError(t, err)
+	assert.True(t, assigned.IsAssignedTo("liv-1"))
+
+	_, err = uc.AssignCourier(context.Background(), order.ID, "liv-1")
+	require.NoError(t, err, "same courier again is a no-op")
+
+	_, err = uc.AssignCourier(context.Background(), order.ID, "liv-2")
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeConflict, derr.Code)
+}
+
+func TestAssignCourierRefusedOutsideClaimableStatuses(t *testing.T) {
+	uc, _, _, _ := setup()
+	order := confirmOrder(t, uc) // CONFIRMED: kitchen has not started
+
+	_, err := uc.AssignCourier(context.Background(), order.ID, "liv-1")
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeConflict, derr.Code)
+
+	_, err = uc.AssignCourier(context.Background(), order.ID, "")
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+}
+
+func TestUnassignCourierFreesTheOrder(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := readyOrder(t, uc, orders)
+	_, _ = uc.AssignCourier(context.Background(), order.ID, "liv-1")
+
+	require.NoError(t, uc.UnassignCourier(context.Background(), order.ID, "liv-1"))
+
+	_, err := uc.AssignCourier(context.Background(), order.ID, "liv-2")
+	require.NoError(t, err)
+}
+
+func TestUpdateStatusForCourierAppliesCourierRules(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := readyOrder(t, uc, orders)
+	_, _ = uc.AssignCourier(context.Background(), order.ID, "liv-1")
+
+	_, err := uc.UpdateStatusForCourier(context.Background(), order.ID, "liv-2", domain.StatusInDelivery)
+	require.Error(t, err, "another courier cannot pick it up")
+
+	_, err = uc.UpdateStatusForCourier(context.Background(), order.ID, "liv-1", domain.StatusCancelled)
+	require.Error(t, err, "a courier cannot cancel")
+
+	updated, err := uc.UpdateStatusForCourier(context.Background(), order.ID, "liv-1", domain.StatusInDelivery)
+	require.NoError(t, err)
+	assert.Equal(t, domain.StatusInDelivery, updated.Status)
 }

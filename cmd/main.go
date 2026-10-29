@@ -84,6 +84,7 @@ func main() {
 	router := httpadapter.NewRouter(
 		httpadapter.NewOrderHandler(uc),
 		httpadapter.JWTConfig{Secret: cfg.JWTSecret, Issuer: cfg.JWTIssuer, Audience: cfg.JWTAudience},
+		cfg.ServiceAPIKey,
 		log,
 		func(ctx context.Context) error { return pool.Ping(ctx) },
 	)
