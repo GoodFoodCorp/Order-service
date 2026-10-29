@@ -21,7 +21,13 @@ type PlaceOrderInput struct {
 	// IdempotencyKey (Idempotency-Key header) protects against double
 	// submission: the same key always yields the same order.
 	IdempotencyKey string
+	// Fulfillment is DELIVERY (default) or PICKUP.
+	Fulfillment string
+	TipCents    int64
 }
+
+// restaurantUnavailableMessage is customer-facing: the cause is logged.
+const restaurantUnavailableMessage = "Impossible de joindre le restaurant pour le moment, veuillez réessayer dans quelques instants."
 
 // maxIdempotencyKeyLength bounds what a client may store with its order.
 const maxIdempotencyKeyLength = 128
@@ -51,8 +57,16 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 			return nil, err
 		}
 	}
-	order, err := domain.NewOrder(actor.UserID, in.RestaurantID, in.DeliveryAddress, in.Items)
+	fulfillment, err := domain.ParseFulfillment(in.Fulfillment)
 	if err != nil {
+		return nil, err
+	}
+	order, err := domain.NewOrderFor(domain.OrderSpec{CustomerID: actor.UserID, RestaurantID: in.RestaurantID,
+		Fulfillment: fulfillment, DeliveryAddress: in.DeliveryAddress, Items: in.Items})
+	if err != nil {
+		return nil, err
+	}
+	if err := order.SetTip(in.TipCents); err != nil {
 		return nil, err
 	}
 	if in.IdempotencyKey != "" {
@@ -73,6 +87,9 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 		if err := order.ApplyPromo(preview.Code, preview.DiscountCents); err != nil {
 			return nil, err
 		}
+	}
+	if err := uc.applyRestaurantQuote(ctx, order); err != nil {
+		return nil, err
 	}
 	if err := uc.orders.Create(ctx, order); err != nil {
 		if order.IdempotencyKey != nil && isDomainError(err, domain.ErrCodeConflict) {
@@ -138,4 +155,26 @@ func distinctMenuItemIDs(order *domain.Order) []string {
 		}
 	}
 	return ids
+}
+
+// applyRestaurantQuote checks with franchise-service that the restaurant is
+// open, accepting orders and delivers this address, and applies its delivery
+// fee. It fails closed: the fee is part of the price.
+func (uc *UseCases) applyRestaurantQuote(ctx context.Context, order *domain.Order) error {
+	if uc.restos == nil {
+		return nil
+	}
+	address := order.DeliveryAddress
+	if order.IsPickup() {
+		address = ""
+	}
+	quote, err := uc.restos.Quote(ctx, order.RestaurantID, address)
+	if err != nil {
+		if isDomainError(err, domain.ErrCodeNotFound) {
+			return domain.NewValidationError("unknown restaurant")
+		}
+		zlog.Warn().Err(err).Str("restaurant_id", order.RestaurantID).Msg("restaurant quote failed")
+		return domain.NewUnavailableError(restaurantUnavailableMessage)
+	}
+	return order.ApplyQuote(*quote)
 }

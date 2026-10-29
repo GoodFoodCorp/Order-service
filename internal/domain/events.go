@@ -38,6 +38,11 @@ type OrderEventData struct {
 	DeliveryAddress string  `json:"deliveryAddress"`
 	AmountDueCents  int64   `json:"amountDueCents"`
 	CourierID       *string `json:"courierId,omitempty"`
+	// Fulfillment lets delivery-service ignore pickups.
+	Fulfillment string   `json:"fulfillment"`
+	TipCents    int64    `json:"tipCents"`
+	DropoffLat  *float64 `json:"dropoffLat,omitempty"`
+	DropoffLng  *float64 `json:"dropoffLng,omitempty"`
 }
 
 // NewOrderEvent snapshots the order after a transition.
@@ -54,6 +59,10 @@ func NewOrderEvent(o *Order) *Event {
 			DeliveryAddress: o.DeliveryAddress,
 			AmountDueCents:  o.AmountDueCents(),
 			CourierID:       o.CourierID,
+			Fulfillment:     string(o.Fulfillment),
+			TipCents:        o.TipCents,
+			DropoffLat:      o.DropoffLat,
+			DropoffLng:      o.DropoffLng,
 		},
 	}
 }

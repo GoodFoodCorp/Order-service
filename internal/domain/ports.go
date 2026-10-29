@@ -14,7 +14,9 @@ type OrderRepository interface {
 	// GetByIdempotencyKey finds the order a customer created with that key;
 	// a missing one is a NOT_FOUND error.
 	GetByIdempotencyKey(ctx context.Context, customerID, key string) (*Order, error)
-	ListByStatuses(ctx context.Context, statuses ...OrderStatus) ([]Order, error)
+	// ListAwaitingCourier returns the deliveries (never pickups) a courier
+	// may claim, oldest first, at most limit.
+	ListAwaitingCourier(ctx context.Context, limit int) ([]Order, error)
 	// UpdateStatus writes order.Status (and confirmed_at) only if the persisted
 	// status still equals from, the status the caller read — a stale read can
 	// never regress or resurrect an order. If the row already holds the target
@@ -121,6 +123,13 @@ type PromoService interface {
 	Redeem(ctx context.Context, code, orderID, customerID string, orderAmountCents int64) (int64, error)
 	// Release gives back the usage of a cancelled, refunded order. Idempotent.
 	Release(ctx context.Context, orderID string) error
+}
+
+// RestaurantService is the outbound port to franchise-service: opening
+// hours, order intake, delivery zone and fees.
+type RestaurantService interface {
+	// Quote answers for a delivery address ("" for a pickup).
+	Quote(ctx context.Context, restaurantID, deliveryAddress string) (*RestaurantQuote, error)
 }
 
 // MenuCatalog is the price authority. What the browser sends is never trusted
