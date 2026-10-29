@@ -35,7 +35,7 @@ func TestLookupSendsContractAndDecodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New(srv.URL, key).Lookup(context.Background(), "r1", []string{"m1", "m2"})
+	got, err := New(srv.URL, key, nil).Lookup(context.Background(), "r1", []string{"m1", "m2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestLookupDeduplicatesAndSendsNonNullEmpty(t *testing.T) {
 		_, _ = w.Write([]byte(`{"recipes":{}}`))
 	}))
 	defer srv.Close()
-	c := New(srv.URL, key)
+	c := New(srv.URL, key, nil)
 
 	if _, err := c.Lookup(context.Background(), "r1", []string{"a", "b", "a", "b"}); err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestLookupChunksAbove200AndMerges(t *testing.T) {
 	for i := range ids {
 		ids[i] = fmt.Sprintf("m%d", i)
 	}
-	got, err := New(srv.URL, key).Lookup(context.Background(), "r1", ids)
+	got, err := New(srv.URL, key, nil).Lookup(context.Background(), "r1", ids)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestLookupErrors(t *testing.T) {
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))
 		}))
-		_, err := New(srv.URL, key).Lookup(context.Background(), "r1", []string{"m1"})
+		_, err := New(srv.URL, key, nil).Lookup(context.Background(), "r1", []string{"m1"})
 		srv.Close()
 		if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), fmt.Sprint(tc.status)) {
 			t.Errorf("status %d: err = %v", tc.status, err)
@@ -135,7 +135,7 @@ func TestLookupUnreachable(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	url := srv.URL
 	srv.Close()
-	_, err := New(url, key).Lookup(context.Background(), "r1", []string{"m1"})
+	_, err := New(url, key, nil).Lookup(context.Background(), "r1", []string{"m1"})
 	if err == nil {
 		t.Fatal("expected error")
 	}

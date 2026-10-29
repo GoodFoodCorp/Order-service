@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"goodfood/order-service/internal/application"
+	"goodfood/order-service/internal/platform/requestid"
 )
 
 type contextKey string
@@ -29,7 +30,8 @@ func RequestID(next http.Handler) http.Handler {
 			id = uuid.NewString()
 		}
 		w.Header().Set(headerRequestID, id)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyRequestID, id)))
+		ctx := requestid.With(context.WithValue(r.Context(), ctxKeyRequestID, id), id)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

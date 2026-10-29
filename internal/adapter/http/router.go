@@ -8,6 +8,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog"
+
+	"goodfood/order-service/internal/platform/metrics"
 )
 
 // HealthChecker lets the router expose readiness without knowing about pgx.
@@ -18,12 +20,15 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 	r := chi.NewRouter()
 
 	r.Use(chimw.Recoverer)
+	r.Use(metrics.Middleware)
 	r.Use(chimw.Compress(5))
 	r.Use(RequestID)
 	r.Use(Logger(log))
 
 	// Sondes directes K8s (si tes probes kubelet tapent /healthz ou /readyz en interne)
 	registerHealthRoutes(r, dbCheck)
+	// Scraped by Prometheus inside the cluster; the ingress only routes /api.
+	r.Handle("/metrics", metrics.Handler())
 
 	r.Route("/api/orders", func(r chi.Router) {
 		// Health checks accessibles aussi via Ingress
