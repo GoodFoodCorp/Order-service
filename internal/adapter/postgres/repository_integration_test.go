@@ -245,3 +245,30 @@ func TestLockerRunsTheJobOnOneHolderAtATime(t *testing.T) {
 		t.Fatal("the lock must be released after the job")
 	}
 }
+
+func TestPickupOrdersRoundTripAndAreNeverClaimable(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	order, _ := domain.NewOrderFor(domain.OrderSpec{CustomerID: uuid.NewString(), RestaurantID: uuid.NewString(),
+		Fulfillment: domain.FulfillmentPickup, Items: []domain.NewOrderItemInput{
+			{MenuItemID: uuid.NewString(), MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 1000}}})
+	_ = order.SetTip(150)
+	order.Status = domain.StatusReadyForPickup
+	if err := repo.Create(ctx, order); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := repo.GetByID(ctx, order.ID)
+	if err != nil || !got.IsPickup() || got.TipCents != 150 || got.AmountDueCents() != 1150 {
+		t.Fatalf("got %+v %v", got, err)
+	}
+	if applied, _ := repo.AssignCourier(ctx, order.ID, uuid.NewString()); applied {
+		t.Fatal("a pickup must never be assigned to a courier")
+	}
+	waiting, _ := repo.ListAwaitingCourier(ctx, 1000)
+	for _, o := range waiting {
+		if o.ID == order.ID {
+			t.Fatal("a pickup must not be listed for couriers")
+		}
+	}
+}

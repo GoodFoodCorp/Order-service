@@ -12,12 +12,13 @@ import (
 )
 
 // orderCols lists the order columns every read selects, in orderDest order.
-const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync, idempotency_key`
+const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync, idempotency_key, fulfillment, delivery_fee_cents, tip_cents, estimated_minutes, dropoff_lat, dropoff_lng`
 
 // orderDest returns the scan destinations matching orderCols.
 func orderDest(o *domain.Order) []any {
 	return []any{&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync, &o.IdempotencyKey}
+		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync, &o.IdempotencyKey,
+		&o.Fulfillment, &o.DeliveryFeeCents, &o.TipCents, &o.EstimatedMinutes, &o.DropoffLat, &o.DropoffLng}
 }
 
 // uniqueViolation is PostgreSQL's SQLSTATE for a unique constraint violation.
@@ -39,11 +40,14 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, idempotency_key)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, idempotency_key,
+		   fulfillment, delivery_fee_cents, tip_cents, estimated_minutes, dropoff_lat, dropoff_lng)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
 		order.ID, order.CustomerID, order.RestaurantID, order.Status,
 		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt,
-		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync), order.IdempotencyKey)
+		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync), order.IdempotencyKey,
+		fulfillmentOrDelivery(order.Fulfillment), order.DeliveryFeeCents, order.TipCents, order.EstimatedMinutes,
+		order.DropoffLat, order.DropoffLng)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return domain.NewConflictError("an order already exists for this idempotency key")
@@ -68,7 +72,7 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
-		`SELECT ` + orderCols + `
+		`SELECT `+orderCols+`
 		 FROM orders WHERE id = $1`, id).
 		Scan(orderDest(&o)...)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -120,14 +124,11 @@ func statusStrings(statuses []domain.OrderStatus) []string {
 	return out
 }
 
-func (r *OrderRepository) ListByStatuses(ctx context.Context, statuses ...domain.OrderStatus) ([]domain.Order, error) {
-	raw := make([]string, len(statuses))
-	for i, s := range statuses {
-		raw[i] = string(s)
-	}
+func (r *OrderRepository) ListAwaitingCourier(ctx context.Context, limit int) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT ` + orderCols + `
-		 FROM orders WHERE status = ANY($1) ORDER BY placed_at ASC`, raw)
+		`SELECT `+orderCols+` FROM orders
+		 WHERE status IN ('IN_PREPARATION', 'READY_FOR_PICKUP') AND fulfillment = 'DELIVERY' AND courier_id IS NULL
+		 ORDER BY placed_at ASC LIMIT $1`, limit)
 }
 
 // errConcurrentChange is returned when a guarded status write found the order
@@ -259,7 +260,7 @@ func (r *OrderRepository) ListByStockSync(ctx context.Context, states []domain.S
 		values[i] = string(s)
 	}
 	return r.list(ctx,
-		`SELECT ` + orderCols + `
+		`SELECT `+orderCols+`
 		 FROM orders WHERE stock_sync = ANY($1) ORDER BY placed_at ASC LIMIT $2`, values, limit)
 }
 
@@ -351,7 +352,7 @@ func (r *OrderRepository) loadItems(ctx context.Context, orderID string) ([]doma
 func (r *OrderRepository) AssignCourier(ctx context.Context, orderID, courierID string) (bool, error) {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE orders SET courier_id = $2
-		 WHERE id = $1 AND status IN ('IN_PREPARATION', 'READY_FOR_PICKUP')
+		 WHERE id = $1 AND status IN ('IN_PREPARATION', 'READY_FOR_PICKUP') AND fulfillment = 'DELIVERY'
 		   AND (courier_id IS NULL OR courier_id = $2)`, orderID, courierID)
 	if err != nil {
 		return false, err
@@ -378,4 +379,11 @@ func (r *OrderRepository) UpdateRefundSync(ctx context.Context, orderID string, 
 func (r *OrderRepository) ListByRefundSync(ctx context.Context, state domain.RefundSyncState, limit int) ([]domain.Order, error) {
 	return r.list(ctx,
 		`SELECT `+orderCols+` FROM orders WHERE refund_sync = $1 ORDER BY placed_at ASC LIMIT $2`, string(state), limit)
+}
+
+func fulfillmentOrDelivery(f domain.Fulfillment) domain.Fulfillment {
+	if f == "" {
+		return domain.FulfillmentDelivery
+	}
+	return f
 }

@@ -15,27 +15,31 @@ type Config struct {
 	PromoServiceURL   string
 	StockServiceURL   string
 	MenuServiceURL    string
-	ServiceAPIKey     string
-	LogLevel          string
-	RabbitMQURL       string
+	// FranchiseServiceURL is optional: empty disables opening hours, delivery
+	// zone and fee checks (local development without franchise-service).
+	FranchiseServiceURL string
+	ServiceAPIKey       string
+	LogLevel            string
+	RabbitMQURL         string
 }
 
 // Load reads the typed configuration from environment variables only
 // (12-factor). It fails fast on missing required values.
 func Load() (*Config, error) {
 	cfg := &Config{
-		Port:              getEnv("PORT", "8082"),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		JWTSecret:         os.Getenv("JWT_SECRET"),
-		JWTIssuer:         getEnv("JWT_ISSUER", "goodfood-auth"),
-		JWTAudience:       getEnv("JWT_AUDIENCE", "goodfood-api"),
-		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
-		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
-		StockServiceURL:   getEnv("STOCK_SERVICE_URL", "http://stock-service:8083"),
-		MenuServiceURL:    getEnv("MENU_SERVICE_URL", "http://menu-service:8085"),
-		ServiceAPIKey:     os.Getenv("SERVICE_API_KEY"),
-		LogLevel:          getEnv("LOG_LEVEL", "info"),
-		RabbitMQURL:       os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
+		Port:                getEnv("PORT", "8082"),
+		DatabaseURL:         os.Getenv("DATABASE_URL"),
+		JWTSecret:           os.Getenv("JWT_SECRET"),
+		JWTIssuer:           getEnv("JWT_ISSUER", "goodfood-auth"),
+		JWTAudience:         getEnv("JWT_AUDIENCE", "goodfood-api"),
+		PaymentServiceURL:   getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
+		PromoServiceURL:     getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
+		StockServiceURL:     getEnv("STOCK_SERVICE_URL", "http://stock-service:8083"),
+		MenuServiceURL:      getEnv("MENU_SERVICE_URL", "http://menu-service:8085"),
+		FranchiseServiceURL: os.Getenv("FRANCHISE_SERVICE_URL"),
+		ServiceAPIKey:       os.Getenv("SERVICE_API_KEY"),
+		LogLevel:            getEnv("LOG_LEVEL", "info"),
+		RabbitMQURL:         os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")

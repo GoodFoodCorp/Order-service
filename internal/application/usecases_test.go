@@ -99,14 +99,11 @@ func (f *fakeOrderRepo) ListByRestaurant(_ context.Context, restaurantID string,
 	return out, nil
 }
 
-func (f *fakeOrderRepo) ListByStatuses(_ context.Context, statuses ...domain.OrderStatus) ([]domain.Order, error) {
+func (f *fakeOrderRepo) ListAwaitingCourier(_ context.Context, limit int) ([]domain.Order, error) {
 	out := []domain.Order{}
 	for _, o := range f.orders {
-		for _, s := range statuses {
-			if o.Status == s {
-				out = append(out, *o)
-				break
-			}
+		if o.IsClaimableByCourier() && o.CourierID == nil && len(out) < limit {
+			out = append(out, *o)
 		}
 	}
 	return out, nil
@@ -2028,6 +2025,157 @@ func TestPlaceOrderRejectsAnOversizedIdempotencyKey(t *testing.T) {
 	uc, _, _, _ := setup()
 	_, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{IdempotencyKey: strings.Repeat("k", 200)})
 	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+}
+
+// ── Restaurant quote: hours, zone, fees, tips, pickup ───────
+
+type fakeRestaurants struct {
+	quote     domain.RestaurantQuote
+	err       error
+	addresses []string
+}
+
+func (f *fakeRestaurants) Quote(_ context.Context, _, address string) (*domain.RestaurantQuote, error) {
+	f.addresses = append(f.addresses, address)
+	if f.err != nil {
+		return nil, f.err
+	}
+	q := f.quote
+	return &q, nil
+}
+
+func setupRestaurants(q domain.RestaurantQuote) (*UseCases, *fakeOrderRepo, *fakePayments, *fakeRestaurants) {
+	orders, payments, restos := newFakeOrderRepo(), newFakePayments(), &fakeRestaurants{quote: q}
+	uc := NewUseCases(Deps{Orders: orders, Payments: payments, Promos: newFakePromos(), Recipes: newFakeRecipes(),
+		Stock: newFakeStock(), Catalog: echoCatalog{}, Restaurants: restos})
+	return uc, orders, payments, restos
+}
+
+func openQuote() domain.RestaurantQuote {
+	lat, lng := 48.85, 2.35
+	return domain.RestaurantQuote{CanOrder: true, DeliveryFeeCents: 299, MinimumOrderCents: 1000,
+		PrepTimeMinutes: 20, EstimatedMinutes: 35, DropoffLat: &lat, DropoffLng: &lng}
+}
+
+func orderInput(fulfillment string, tip int64) PlaceOrderInput {
+	return PlaceOrderInput{
+		RestaurantID: "resto-1", DeliveryAddress: "12 rue de Paris", Fulfillment: fulfillment, TipCents: tip,
+		Items: []domain.NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 2, UnitPriceCents: 1299}},
+	}
+}
+
+func TestDeliveryOrderChargesFeeAndTip(t *testing.T) {
+	uc, _, payments, _ := setupRestaurants(openQuote())
+
+	order, err := uc.PlaceOrder(context.Background(), customer, orderInput("", 200))
+	require.NoError(t, err)
+	assert.Equal(t, domain.FulfillmentDelivery, order.Fulfillment)
+	assert.Equal(t, int64(299), order.DeliveryFeeCents)
+	assert.Equal(t, int64(2598+299+200), order.AmountDueCents())
+	assert.Equal(t, 35, order.EstimatedMinutes)
+	require.NotNil(t, order.DropoffLat)
+
+	_, err = uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(3097), payments.created[order.ID].AmountCents, "fee and tip are charged")
+}
+
+func TestPickupOrderHasNoFeeNorAddressAndSkipsCouriers(t *testing.T) {
+	uc, orders, _, restos := setupRestaurants(openQuote())
+	in := orderInput("pickup", 0)
+	in.DeliveryAddress = ""
+
+	order, err := uc.PlaceOrder(context.Background(), customer, in)
+	require.NoError(t, err)
+	assert.Equal(t, domain.FulfillmentPickup, order.Fulfillment)
+	assert.Zero(t, order.DeliveryFeeCents)
+	assert.Equal(t, 20, order.EstimatedMinutes, "ready when prepared")
+	assert.Equal(t, []string{""}, restos.addresses, "no address to check for a pickup")
+
+	payAndConfirm(t, uc, order.ID)
+	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusInPreparation)
+	require.NoError(t, err)
+	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusReadyForPickup)
+	require.NoError(t, err)
+
+	_, err = uc.AssignCourier(context.Background(), order.ID, courier.UserID)
+	require.Error(t, err, "pickups are never offered to couriers")
+	list, _ := uc.ListClaimableOrders(context.Background())
+	assert.Empty(t, list)
+
+	collected, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusDelivered)
+	require.NoError(t, err, "the counter hands it over")
+	assert.Equal(t, domain.StatusDelivered, collected.Status)
+	assert.Equal(t, "pickup", strings.ToLower(orders.events[len(orders.events)-1].Data.Fulfillment))
+}
+
+func TestDeliveryOrderCannotSkipTheCourier(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := confirmOrder(t, uc)
+	orders.orders[order.ID].Status = domain.StatusReadyForPickup
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusDelivered)
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeInvalidTransition, derr.Code)
+}
+
+func TestRestaurantRefusalsReachTheCustomer(t *testing.T) {
+	for refusal, want := range map[string]string{"CLOSED": "fermé", "PAUSED": "ne prend plus", "OUTOFZONE": "hors de la zone"} {
+		t.Run(refusal, func(t *testing.T) {
+			q := openQuote()
+			q.CanOrder, q.Refusal = false, refusal
+			uc, orders, _, _ := setupRestaurants(q)
+
+			_, err := uc.PlaceOrder(context.Background(), customer, orderInput("", 0))
+
+			var derr *domain.Error
+			require.ErrorAs(t, err, &derr)
+			assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+			assert.Contains(t, derr.Message, want)
+			assert.Empty(t, orders.orders)
+		})
+	}
+}
+
+func TestMinimumOrderAppliesToDeliveriesOnly(t *testing.T) {
+	q := openQuote()
+	q.MinimumOrderCents = 5000
+	uc, _, _, _ := setupRestaurants(q)
+
+	_, err := uc.PlaceOrder(context.Background(), customer, orderInput("", 0))
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Contains(t, derr.Message, "minimum order")
+
+	pickup := orderInput("PICKUP", 0)
+	_, err = uc.PlaceOrder(context.Background(), customer, pickup)
+	assert.NoError(t, err)
+}
+
+func TestPlaceOrderFailsClosedWhenTheRestaurantCannotBeReached(t *testing.T) {
+	uc, _, _, restos := setupRestaurants(openQuote())
+	restos.err = errors.New("franchise-service down")
+
+	_, err := uc.PlaceOrder(context.Background(), customer, orderInput("", 0))
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeUnavailable, derr.Code)
+}
+
+func TestTipAndFulfillmentValidation(t *testing.T) {
+	uc, _, _, _ := setupRestaurants(openQuote())
+	var derr *domain.Error
+
+	_, err := uc.PlaceOrder(context.Background(), customer, orderInput("", -1))
+	require.ErrorAs(t, err, &derr)
+	_, err = uc.PlaceOrder(context.Background(), customer, orderInput("", domain.MaxTipCents+1))
+	require.ErrorAs(t, err, &derr)
+	_, err = uc.PlaceOrder(context.Background(), customer, orderInput("drone", 0))
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
 }

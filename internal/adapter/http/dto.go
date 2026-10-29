@@ -24,6 +24,8 @@ type createOrderRequest struct {
 	DeliveryAddress string                   `json:"delivery_address"`
 	Items           []createOrderItemRequest `json:"items"`
 	PromoCode       string                   `json:"promo_code"`
+	Fulfillment     string                   `json:"fulfillment"`
+	TipCents        int64                    `json:"tip_cents"`
 }
 
 type updateStatusRequest struct {
@@ -75,6 +77,12 @@ type orderResponse struct {
 	PlacedAt         time.Time           `json:"placed_at"`
 	ConfirmedAt      *time.Time          `json:"confirmed_at,omitempty"`
 	CourierID        *string             `json:"courier_id,omitempty"`
+	Fulfillment      string              `json:"fulfillment"`
+	DeliveryFeeCents int64               `json:"delivery_fee_cents"`
+	TipCents         int64               `json:"tip_cents"`
+	EstimatedMinutes int                 `json:"estimated_minutes,omitempty"`
+	DropoffLat       *float64            `json:"dropoff_lat,omitempty"`
+	DropoffLng       *float64            `json:"dropoff_lng,omitempty"`
 }
 
 type paymentIntentResponse struct {
@@ -115,6 +123,12 @@ func toOrderResponse(o *domain.Order) orderResponse {
 		PlacedAt:         o.PlacedAt,
 		ConfirmedAt:      o.ConfirmedAt,
 		CourierID:        o.CourierID,
+		Fulfillment:      string(o.Fulfillment),
+		DeliveryFeeCents: o.DeliveryFeeCents,
+		TipCents:         o.TipCents,
+		EstimatedMinutes: o.EstimatedMinutes,
+		DropoffLat:       o.DropoffLat,
+		DropoffLng:       o.DropoffLng,
 	}
 }
 

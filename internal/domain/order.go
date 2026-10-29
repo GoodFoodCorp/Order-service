@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ var allowedTransitions = map[OrderStatus][]OrderStatus{
 	StatusPaymentPending: {StatusConfirmed, StatusCancelled},
 	StatusConfirmed:      {StatusInPreparation, StatusCancelled},
 	StatusInPreparation:  {StatusReadyForPickup, StatusCancelled},
-	StatusReadyForPickup: {StatusInDelivery, StatusCancelled},
+	StatusReadyForPickup: {StatusInDelivery, StatusDelivered, StatusCancelled},
 	StatusInDelivery:     {StatusDelivered},
 	StatusDelivered:      {},
 	StatusCancelled:      {},
@@ -71,7 +72,42 @@ type Order struct {
 	// IdempotencyKey, when the client sent one, makes a retried creation
 	// return this order instead of placing a second one.
 	IdempotencyKey *string
+	// Fulfillment says whether a courier delivers the order or the customer
+	// collects it at the counter (click & collect).
+	Fulfillment Fulfillment
+	// DeliveryFeeCents is the restaurant's fee, 0 for a pickup.
+	DeliveryFeeCents int64
+	// TipCents goes to the courier (or the kitchen for a pickup).
+	TipCents int64
+	// EstimatedMinutes is the delivery (or pickup) time quoted at checkout.
+	EstimatedMinutes int
+	// DropoffLat/DropoffLng locate the delivery address when it was geocoded.
+	DropoffLat *float64
+	DropoffLng *float64
 }
+
+// Fulfillment is how the order reaches the customer.
+type Fulfillment string
+
+const (
+	FulfillmentDelivery Fulfillment = "DELIVERY"
+	FulfillmentPickup   Fulfillment = "PICKUP"
+)
+
+// ParseFulfillment defaults to DELIVERY.
+func ParseFulfillment(s string) (Fulfillment, error) {
+	switch f := Fulfillment(strings.ToUpper(strings.TrimSpace(s))); f {
+	case "":
+		return FulfillmentDelivery, nil
+	case FulfillmentDelivery, FulfillmentPickup:
+		return f, nil
+	default:
+		return "", NewValidationError("fulfillment must be DELIVERY or PICKUP")
+	}
+}
+
+// IsPickup reports whether the customer collects the order themselves.
+func (o *Order) IsPickup() bool { return o.Fulfillment == FulfillmentPickup }
 
 type NewOrderItemInput struct {
 	MenuItemID          string
@@ -86,13 +122,33 @@ type NewOrderItemInput struct {
 // PlaceOrder passes the order through the MenuCatalog (Reprice) before it is
 // persisted, and the catalog's prices are the ones that are charged.
 func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrderItemInput) (*Order, error) {
+	return NewOrderFor(OrderSpec{CustomerID: customerID, RestaurantID: restaurantID,
+		Fulfillment: FulfillmentDelivery, DeliveryAddress: deliveryAddress, Items: items})
+}
+
+// OrderSpec describes an order to create.
+type OrderSpec struct {
+	CustomerID      string
+	RestaurantID    string
+	Fulfillment     Fulfillment
+	DeliveryAddress string
+	Items           []NewOrderItemInput
+}
+
+// NewOrderFor builds a valid PLACED order. A delivery needs an address; a
+// pickup does not.
+func NewOrderFor(spec OrderSpec) (*Order, error) {
+	customerID, restaurantID, deliveryAddress, items := spec.CustomerID, spec.RestaurantID, spec.DeliveryAddress, spec.Items
+	if spec.Fulfillment == "" {
+		spec.Fulfillment = FulfillmentDelivery
+	}
 	if customerID == "" {
 		return nil, NewValidationError("customer id is required")
 	}
 	if restaurantID == "" {
 		return nil, NewValidationError("restaurant id is required")
 	}
-	if strings.TrimSpace(deliveryAddress) == "" {
+	if spec.Fulfillment == FulfillmentDelivery && strings.TrimSpace(deliveryAddress) == "" {
 		return nil, NewValidationError("delivery address is required")
 	}
 	if len(items) == 0 {
@@ -139,6 +195,7 @@ func NewOrder(customerID, restaurantID, deliveryAddress string, items []NewOrder
 		PlacedAt:         time.Now().UTC(),
 		StockSync:        StockSyncNone,
 		RefundSync:       RefundSyncNone,
+		Fulfillment:      spec.Fulfillment,
 	}, nil
 }
 
@@ -180,8 +237,14 @@ func (o *Order) CanTransitionTo(target OrderStatus) bool {
 }
 
 // TransitionTo applies a lifecycle change, stamping ConfirmedAt when relevant.
+// From READY_FOR_PICKUP a delivery goes IN_DELIVERY with its courier, while a
+// pickup goes straight to DELIVERED when the customer collects it.
 func (o *Order) TransitionTo(target OrderStatus) error {
 	if !o.CanTransitionTo(target) {
+		return NewInvalidTransitionError(o.Status, target)
+	}
+	if o.Status == StatusReadyForPickup &&
+		((target == StatusDelivered && !o.IsPickup()) || (target == StatusInDelivery && o.IsPickup())) {
 		return NewInvalidTransitionError(o.Status, target)
 	}
 	o.Status = target
@@ -196,9 +259,75 @@ func (o *Order) TransitionTo(target OrderStatus) error {
 func (o *Order) IsOwnedBy(userID string) bool { return o.CustomerID == userID }
 
 // AmountDueCents is what actually gets charged: the item subtotal minus any
-// promo discount. TotalAmountCents itself always stays the pre-discount
-// subtotal so a code's history stays traceable on the order.
-func (o *Order) AmountDueCents() int64 { return o.TotalAmountCents - o.DiscountCents }
+// promo discount, plus the delivery fee and the tip. TotalAmountCents itself
+// always stays the pre-discount subtotal so a code's history stays traceable.
+func (o *Order) AmountDueCents() int64 {
+	return o.TotalAmountCents - o.DiscountCents + o.DeliveryFeeCents + o.TipCents
+}
+
+// MaxTipCents caps a tip, against typos (100 € instead of 1 €).
+const MaxTipCents = 10_000
+
+// SetTip records the customer's tip.
+func (o *Order) SetTip(cents int64) error {
+	if cents < 0 || cents > MaxTipCents {
+		return NewValidationError("tip must be between 0 and 100 €")
+	}
+	o.TipCents = cents
+	return nil
+}
+
+// ApplyQuote records the restaurant's answer for this order: delivery fee
+// (none for a pickup), estimated time and drop-off position. The minimum
+// order applies to deliveries, on the discounted subtotal.
+func (o *Order) ApplyQuote(q RestaurantQuote) error {
+	if !q.CanOrder {
+		return NewValidationError(q.RefusalMessage())
+	}
+	o.EstimatedMinutes = q.EstimatedMinutes
+	if o.IsPickup() {
+		o.DeliveryFeeCents = 0
+		o.EstimatedMinutes = q.PrepTimeMinutes
+		return nil
+	}
+	if subtotal := o.TotalAmountCents - o.DiscountCents; subtotal < q.MinimumOrderCents {
+		return NewValidationError(fmt.Sprintf("minimum order for delivery: %d,%02d €", q.MinimumOrderCents/100, q.MinimumOrderCents%100))
+	}
+	o.DeliveryFeeCents = q.DeliveryFeeCents
+	o.DropoffLat, o.DropoffLng = q.DropoffLat, q.DropoffLng
+	return nil
+}
+
+// RestaurantQuote is franchise-service's answer to "can this restaurant take
+// this order now, and at what delivery fee".
+type RestaurantQuote struct {
+	CanOrder          bool
+	Refusal           string
+	DeliveryFeeCents  int64
+	MinimumOrderCents int64
+	PrepTimeMinutes   int
+	EstimatedMinutes  int
+	DropoffLat        *float64
+	DropoffLng        *float64
+}
+
+// RefusalMessage is customer-facing.
+func (q RestaurantQuote) RefusalMessage() string {
+	switch q.Refusal {
+	case "CLOSED":
+		return "Le restaurant est fermé pour le moment."
+	case "PAUSED":
+		return "Le restaurant ne prend plus de commandes pour le moment, réessayez plus tard."
+	case "OUTOFZONE":
+		return "Cette adresse est hors de la zone de livraison du restaurant."
+	case "UNKNOWNADDRESS":
+		return "Adresse de livraison introuvable, vérifiez-la."
+	case "INACTIVE":
+		return "Ce restaurant n'est plus disponible."
+	default:
+		return "Ce restaurant ne peut pas prendre votre commande pour le moment."
+	}
+}
 
 // ApplyPromo records a discount already validated by promo-service. The code
 // itself is never re-validated here — promo-service is the source of truth.
@@ -219,7 +348,7 @@ var claimableByCourier = map[OrderStatus]bool{
 }
 
 // IsClaimableByCourier reports whether a courier may be assigned now.
-func (o *Order) IsClaimableByCourier() bool { return claimableByCourier[o.Status] }
+func (o *Order) IsClaimableByCourier() bool { return !o.IsPickup() && claimableByCourier[o.Status] }
 
 // IsAssignedTo reports whether the given courier runs this order's delivery.
 func (o *Order) IsAssignedTo(courierID string) bool {

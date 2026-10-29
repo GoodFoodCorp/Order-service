@@ -39,6 +39,7 @@ type UseCases struct {
 	recipes  domain.RecipeService
 	stock    domain.StockService
 	catalog  domain.MenuCatalog
+	restos   domain.RestaurantService
 }
 
 // Deps lists the ports the use cases need.
@@ -49,9 +50,12 @@ type Deps struct {
 	Recipes  domain.RecipeService
 	Stock    domain.StockService
 	Catalog  domain.MenuCatalog
+	// Restaurants is optional: without it opening hours and delivery zones
+	// are not checked and no delivery fee is charged.
+	Restaurants domain.RestaurantService
 }
 
 func NewUseCases(d Deps) *UseCases {
 	return &UseCases{orders: d.Orders, payments: d.Payments, promos: d.Promos,
-		recipes: d.Recipes, stock: d.Stock, catalog: d.Catalog}
+		recipes: d.Recipes, stock: d.Stock, catalog: d.Catalog, restos: d.Restaurants}
 }

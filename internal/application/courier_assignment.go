@@ -57,5 +57,5 @@ func (uc *UseCases) GetOrderForDelivery(ctx context.Context, orderID string) (*d
 // ListClaimableOrders returns the orders awaiting a courier, for
 // delivery-service's reconciliation.
 func (uc *UseCases) ListClaimableOrders(ctx context.Context) ([]domain.Order, error) {
-	return uc.orders.ListByStatuses(ctx, claimableStatuses...)
+	return uc.orders.ListAwaitingCourier(ctx, maxClaimableListed)
 }

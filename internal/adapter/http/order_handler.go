@@ -45,6 +45,8 @@ func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Items:           items,
 		PromoCode:       req.PromoCode,
 		IdempotencyKey:  r.Header.Get("Idempotency-Key"),
+		Fulfillment:     req.Fulfillment,
+		TipCents:        req.TipCents,
 	})
 	if err != nil {
 		writeDomainError(w, r, err)

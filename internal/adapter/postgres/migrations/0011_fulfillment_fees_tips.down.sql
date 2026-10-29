@@ -1,0 +1,6 @@
+ALTER TABLE orders DROP COLUMN IF EXISTS dropoff_lng;
+ALTER TABLE orders DROP COLUMN IF EXISTS dropoff_lat;
+ALTER TABLE orders DROP COLUMN IF EXISTS estimated_minutes;
+ALTER TABLE orders DROP COLUMN IF EXISTS tip_cents;
+ALTER TABLE orders DROP COLUMN IF EXISTS delivery_fee_cents;
+ALTER TABLE orders DROP COLUMN IF EXISTS fulfillment;

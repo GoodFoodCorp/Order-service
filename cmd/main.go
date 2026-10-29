@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog"
 
+	"goodfood/order-service/internal/adapter/franchiseclient"
 	httpadapter "goodfood/order-service/internal/adapter/http"
 	"goodfood/order-service/internal/adapter/menuclient"
 	"goodfood/order-service/internal/adapter/messaging"
@@ -22,6 +23,7 @@ import (
 	"goodfood/order-service/internal/adapter/stockclient"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/config"
+	"goodfood/order-service/internal/domain"
 )
 
 const (
@@ -58,6 +60,13 @@ func main() {
 
 	// menu-service is both the recipe source (stock) and the price authority.
 	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey)
+	var restaurants domain.RestaurantService
+	if cfg.FranchiseServiceURL != "" {
+		restaurants = franchiseclient.New(cfg.FranchiseServiceURL, cfg.ServiceAPIKey, nil)
+		log.Info().Str("franchise_service", cfg.FranchiseServiceURL).Msg("opening hours, delivery zone and fees checked with franchise-service")
+	} else {
+		log.Warn().Msg("FRANCHISE_SERVICE_URL not set: opening hours, delivery zone and fees are not checked")
+	}
 	uc := application.NewUseCases(application.Deps{
 		Orders:   postgres.NewOrderRepository(pool),
 		Payments: paymentclient.New(cfg.PaymentServiceURL, cfg.ServiceAPIKey, nil),
@@ -65,6 +74,8 @@ func main() {
 		Recipes:  menu,
 		Stock:    stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
 		Catalog:  menu,
+
+		Restaurants: restaurants,
 	})
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
