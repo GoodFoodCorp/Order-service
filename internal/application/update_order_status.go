@@ -19,7 +19,8 @@ var courierAllowedTargets = map[domain.OrderStatus]bool{
 
 // UpdateOrderStatus applies a back-office lifecycle change.
 // Managers act on their own restaurant only; head office on any order;
-// couriers only on the delivery-related transitions.
+// couriers only on the delivery-related transitions of the orders assigned to
+// them.
 func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID string, target domain.OrderStatus) (*domain.Order, error) {
 	order, err := uc.orders.GetByID(ctx, orderID)
 	if err != nil {
@@ -35,6 +36,9 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 	case actor.HasRole(RoleCourier):
 		if !courierAllowedTargets[target] {
 			return nil, domain.NewForbiddenError("couriers can only set delivery-related statuses")
+		}
+		if !order.IsAssignedTo(actor.UserID) {
+			return nil, domain.NewForbiddenError("this delivery is assigned to another courier")
 		}
 	default:
 		return nil, domain.NewForbiddenError("you are not allowed to update order status")

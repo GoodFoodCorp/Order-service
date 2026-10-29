@@ -10,6 +10,15 @@ import (
 	"goodfood/order-service/internal/domain"
 )
 
+// orderCols lists the order columns every read selects, in orderDest order.
+const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id`
+
+// orderDest returns the scan destinations matching orderCols.
+func orderDest(o *domain.Order) []any {
+	return []any{&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
+		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID}
+}
+
 type OrderRepository struct {
 	pool *pgxpool.Pool
 }
@@ -50,10 +59,9 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		`SELECT ` + orderCols + `
 		 FROM orders WHERE id = $1`, id).
-		Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-			&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync)
+		Scan(orderDest(&o)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, domain.NewNotFoundError("order not found")
 	}
@@ -71,13 +79,13 @@ func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order
 
 func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		`SELECT ` + orderCols + `
 		 FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC`, customerID)
 }
 
 func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		`SELECT ` + orderCols + `
 		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
 }
 
@@ -87,7 +95,7 @@ func (r *OrderRepository) ListByStatuses(ctx context.Context, statuses ...domain
 		raw[i] = string(s)
 	}
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		`SELECT ` + orderCols + `
 		 FROM orders WHERE status = ANY($1) ORDER BY placed_at ASC`, raw)
 }
 
@@ -188,7 +196,7 @@ func (r *OrderRepository) ListByStockSync(ctx context.Context, states []domain.S
 		values[i] = string(s)
 	}
 	return r.list(ctx,
-		`SELECT id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync
+		`SELECT ` + orderCols + `
 		 FROM orders WHERE stock_sync = ANY($1) ORDER BY placed_at ASC LIMIT $2`, values, limit)
 }
 
@@ -210,9 +218,7 @@ func (r *OrderRepository) list(ctx context.Context, query string, args ...any) (
 	orders := []domain.Order{}
 	for rows.Next() {
 		var o domain.Order
-		if err := rows.Scan(&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status,
-			&o.TotalAmountCents, &o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt,
-			&o.PromoCode, &o.DiscountCents, &o.StockSync); err != nil {
+		if err := rows.Scan(orderDest(&o)...); err != nil {
 			return nil, err
 		}
 		orders = append(orders, o)
@@ -250,4 +256,22 @@ func (r *OrderRepository) loadItems(ctx context.Context, orderID string) ([]doma
 		items = append(items, it)
 	}
 	return items, rows.Err()
+}
+
+func (r *OrderRepository) AssignCourier(ctx context.Context, orderID, courierID string) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE orders SET courier_id = $2
+		 WHERE id = $1 AND status IN ('IN_PREPARATION', 'READY_FOR_PICKUP')
+		   AND (courier_id IS NULL OR courier_id = $2)`, orderID, courierID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+func (r *OrderRepository) UnassignCourier(ctx context.Context, orderID, courierID string) error {
+	_, err := r.pool.Exec(ctx,
+		`UPDATE orders SET courier_id = NULL WHERE id = $1 AND courier_id = $2 AND status IN ('IN_PREPARATION', 'READY_FOR_PICKUP')`,
+		orderID, courierID)
+	return err
 }
