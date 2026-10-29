@@ -9,6 +9,8 @@ type Config struct {
 	Port              string
 	DatabaseURL       string
 	JWTSecret         string
+	JWTIssuer         string
+	JWTAudience       string
 	PaymentServiceURL string
 	PromoServiceURL   string
 	StockServiceURL   string
@@ -25,6 +27,8 @@ func Load() (*Config, error) {
 		Port:              getEnv("PORT", "8082"),
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		JWTSecret:         os.Getenv("JWT_SECRET"),
+		JWTIssuer:         getEnv("JWT_ISSUER", "goodfood-auth"),
+		JWTAudience:       getEnv("JWT_AUDIENCE", "goodfood-api"),
 		PaymentServiceURL: getEnv("PAYMENT_SERVICE_URL", "http://payment-service:8086"),
 		PromoServiceURL:   getEnv("PROMO_SERVICE_URL", "http://promo-service:8092"),
 		StockServiceURL:   getEnv("STOCK_SERVICE_URL", "http://stock-service:8083"),

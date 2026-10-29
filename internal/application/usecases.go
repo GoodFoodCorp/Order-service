@@ -42,9 +42,21 @@ type UseCases struct {
 	catalog  domain.MenuCatalog
 }
 
-func NewUseCases(orders domain.OrderRepository, payments domain.PaymentService, promos domain.PromoService, events domain.EventPublisher, recipes domain.RecipeService, stock domain.StockService, catalog domain.MenuCatalog) *UseCases {
-	if events == nil {
-		events = domain.NoopPublisher{}
+// Deps lists the ports the use cases need.
+type Deps struct {
+	Orders   domain.OrderRepository
+	Payments domain.PaymentService
+	Promos   domain.PromoService
+	Events   domain.EventPublisher
+	Recipes  domain.RecipeService
+	Stock    domain.StockService
+	Catalog  domain.MenuCatalog
+}
+
+func NewUseCases(d Deps) *UseCases {
+	if d.Events == nil {
+		d.Events = domain.NoopPublisher{}
 	}
-	return &UseCases{orders: orders, payments: payments, promos: promos, events: events, recipes: recipes, stock: stock, catalog: catalog}
+	return &UseCases{orders: d.Orders, payments: d.Payments, promos: d.Promos, events: d.Events,
+		recipes: d.Recipes, stock: d.Stock, catalog: d.Catalog}
 }

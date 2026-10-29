@@ -82,9 +82,16 @@ func (h *OrderHandler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// POST /api/orders/{id}/payment-intent
+// POST /api/orders/{id}/payment-intent  [{payment_method_id}]
 func (h *OrderHandler) CreatePaymentIntent(w http.ResponseWriter, r *http.Request) {
-	res, err := h.uc.CreatePaymentIntent(r.Context(), actorFrom(r), chi.URLParam(r, "id"))
+	var req paymentIntentRequest
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+			writeError(w, r, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+	}
+	res, err := h.uc.CreatePaymentIntent(r.Context(), actorFrom(r), chi.URLParam(r, "id"), req.PaymentMethodID)
 	if err != nil {
 		writeDomainError(w, r, err)
 		return

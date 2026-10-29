@@ -55,7 +55,7 @@ func setupPriced(catalog domain.MenuCatalog) (*UseCases, *fakeOrderRepo, *fakePr
 	orders := newFakeOrderRepo()
 	promos := newFakePromos()
 	stock := newFakeStock()
-	return NewUseCases(orders, newFakePayments(), promos, domain.NoopPublisher{}, newFakeRecipes(), stock, catalog), orders, promos, stock
+	return NewUseCases(Deps{Orders: orders, Payments: newFakePayments(), Promos: promos, Recipes: newFakeRecipes(), Stock: stock, Catalog: catalog}), orders, promos, stock
 }
 
 func placeWith(uc *UseCases, promo string, items ...domain.NewOrderItemInput) (*domain.Order, error) {

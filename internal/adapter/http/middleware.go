@@ -2,12 +2,10 @@ package http
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
@@ -64,10 +62,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-// Auth validates the HS256 JWT issued by auth-service (shared secret,
+// Auth validates the HS256 access token issued by auth-service (shared secret,
 // ADR-001) from the Authorization: Bearer header or the auth_token cookie,
 // and stores the Actor in the request context.
-func Auth(jwtSecret string) func(http.Handler) http.Handler {
+func Auth(cfg JWTConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tokenString := ""
@@ -81,19 +79,9 @@ func Auth(jwtSecret string) func(http.Handler) http.Handler {
 				return
 			}
 
-			token, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
-				if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-					return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
-				}
-				return []byte(jwtSecret), nil
-			})
-			if err != nil || !token.Valid {
+			claims, err := parseAccessToken(tokenString, cfg)
+			if err != nil {
 				writeError(w, r, http.StatusUnauthorized, "invalid or expired token")
-				return
-			}
-			claims, ok := token.Claims.(jwt.MapClaims)
-			if !ok {
-				writeError(w, r, http.StatusUnauthorized, "invalid token claims")
 				return
 			}
 
