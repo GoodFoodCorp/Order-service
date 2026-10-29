@@ -14,7 +14,7 @@ import (
 type HealthChecker func(ctx context.Context) error
 
 // NewRouter assembles middlewares and routes.
-func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
+func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, log zerolog.Logger, dbCheck HealthChecker) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.Recoverer)
@@ -40,7 +40,7 @@ func NewRouter(handler *OrderHandler, jwtSecret string, log zerolog.Logger, dbCh
 
 		// Routes protégées par JWT
 		r.Group(func(r chi.Router) {
-			r.Use(Auth(jwtSecret))
+			r.Use(Auth(jwtCfg))
 
 			r.Post("/", handler.Create)
 			r.Get("/", handler.List)

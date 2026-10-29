@@ -34,8 +34,8 @@ internal/
 │   ├── postgres/          # Repository pgx + migrations SQL embarquées
 │   ├── menuclient/        # Client REST vers menu-service (recettes, clé de service)
 │   ├── stockclient/       # Client REST vers stock-service (check/consume/restore, clé de service)
-│   ├── paymentclient/     # Client REST vers payment-service (JWT transmis)
-│   └── promoclient/       # Client REST vers promo-service (JWT transmis)
+│   ├── paymentclient/     # Client REST interne vers payment-service (X-Service-Key)
+│   └── promoclient/       # promo-service : preview (JWT client), redeem/release (X-Service-Key)
 └── config/                # Configuration typée depuis l'environnement
 ```
 
@@ -175,6 +175,7 @@ uniquement si un code promo est utilisé.
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | oui | Base dédiée `order-db` |
 | `DATABASE_URL` | oui | Chaîne pgx (le compose la construit pour le conteneur) |
 | `JWT_SECRET` | oui | Secret HS256 partagé avec `auth-service` |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | non | Défauts `goodfood-auth` / `goodfood-api` |
 | `PAYMENT_SERVICE_URL` | non | Défaut `http://payment-service:8086` |
 | `PROMO_SERVICE_URL` | non | Défaut `http://promo-service:8092` |
 | `STOCK_SERVICE_URL` | non | Défaut `http://stock-service:8083` |

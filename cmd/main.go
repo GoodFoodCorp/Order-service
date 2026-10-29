@@ -68,22 +68,22 @@ func main() {
 
 	// menu-service is both the recipe source (stock) and the price authority.
 	menu := menuclient.New(cfg.MenuServiceURL, cfg.ServiceAPIKey)
-	uc := application.NewUseCases(
-		postgres.NewOrderRepository(pool),
-		paymentclient.New(cfg.PaymentServiceURL),
-		promoclient.New(cfg.PromoServiceURL),
-		events,
-		menu,
-		stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
-		menu,
-	)
+	uc := application.NewUseCases(application.Deps{
+		Orders:   postgres.NewOrderRepository(pool),
+		Payments: paymentclient.New(cfg.PaymentServiceURL, cfg.ServiceAPIKey, nil),
+		Promos:   promoclient.New(cfg.PromoServiceURL, cfg.ServiceAPIKey, nil),
+		Events:   events,
+		Recipes:  menu,
+		Stock:    stockclient.New(cfg.StockServiceURL, cfg.ServiceAPIKey),
+		Catalog:  menu,
+	})
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
 	log.Info().Str("menu_service", cfg.MenuServiceURL).Str("stock_service", cfg.StockServiceURL).Msg("stock checked against stock-service using menu-service recipes")
 
 	router := httpadapter.NewRouter(
 		httpadapter.NewOrderHandler(uc),
-		cfg.JWTSecret,
+		httpadapter.JWTConfig{Secret: cfg.JWTSecret, Issuer: cfg.JWTIssuer, Audience: cfg.JWTAudience},
 		log,
 		func(ctx context.Context) error { return pool.Ping(ctx) },
 	)

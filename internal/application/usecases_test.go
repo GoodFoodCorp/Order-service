@@ -198,32 +198,47 @@ func (f *fakeOrderRepo) ListByStockSync(_ context.Context, states []domain.Stock
 
 // fakePayments stands in for payment-service (which owns Stripe).
 type fakePayments struct {
-	created     map[string]int64
+	created     map[string]domain.PaymentIntentRequest
 	status      string
 	createCalls int
+	// paidCents, when set, is the amount payment-service reports as paid
+	// (simulates a payment that does not match the order).
+	paidCents int64
+	refunds   []string
+	refundErr error
 }
 
 func newFakePayments() *fakePayments {
-	return &fakePayments{created: map[string]int64{}, status: "SUCCEEDED"}
+	return &fakePayments{created: map[string]domain.PaymentIntentRequest{}, status: domain.PaymentStatusSucceeded}
 }
 
-func (f *fakePayments) CreateIntent(_ context.Context, _, orderID string, amountCents int64, currency string) (*domain.PaymentIntent, error) {
+func (f *fakePayments) CreateIntent(_ context.Context, req domain.PaymentIntentRequest) (*domain.PaymentIntent, error) {
 	f.createCalls++
-	f.created[orderID] = amountCents
+	f.created[req.OrderID] = req
 	return &domain.PaymentIntent{
-		ID:           "pi_test_" + orderID,
+		ID:           "pi_test_" + req.OrderID,
 		ClientSecret: "secret",
 		Status:       "requires_payment_method",
-		AmountCents:  amountCents,
-		Currency:     currency,
+		AmountCents:  req.AmountCents,
+		Currency:     req.Currency,
 	}, nil
 }
 
-func (f *fakePayments) Confirm(_ context.Context, _, orderID string) (string, error) {
-	if _, ok := f.created[orderID]; !ok {
-		return "", errors.New("no payment intent found for this order")
+func (f *fakePayments) GetPayment(_ context.Context, orderID string) (*domain.Payment, error) {
+	req, ok := f.created[orderID]
+	if !ok {
+		return nil, domain.NewNotFoundError("no payment for this order")
 	}
-	return f.status, nil
+	amount := req.AmountCents
+	if f.paidCents != 0 {
+		amount = f.paidCents
+	}
+	return &domain.Payment{OrderID: orderID, CustomerID: req.CustomerID, Status: f.status, AmountCents: amount, Currency: req.Currency}, nil
+}
+
+func (f *fakePayments) Refund(_ context.Context, orderID string) error {
+	f.refunds = append(f.refunds, orderID)
+	return f.refundErr
 }
 
 // fakePromos stands in for promo-service.
@@ -232,6 +247,7 @@ type fakePromos struct {
 	redeemCalls  int
 	redeemedFor  map[string]bool // orderID already redeemed
 	previewError error
+	released     []string
 }
 
 func newFakePromos() *fakePromos {
@@ -249,7 +265,7 @@ func (f *fakePromos) Preview(_ context.Context, _, code string, orderAmountCents
 	return &domain.PromoPreview{Code: code, DiscountCents: orderAmountCents * int64(percent) / 100}, nil
 }
 
-func (f *fakePromos) Redeem(_ context.Context, _, code, orderID string, orderAmountCents int64) (int64, error) {
+func (f *fakePromos) Redeem(_ context.Context, code, orderID, _ string, orderAmountCents int64) (int64, error) {
 	f.redeemCalls++
 	percent, ok := f.codes[code]
 	if !ok {
@@ -257,6 +273,11 @@ func (f *fakePromos) Redeem(_ context.Context, _, code, orderID string, orderAmo
 	}
 	f.redeemedFor[orderID] = true
 	return orderAmountCents * int64(percent) / 100, nil
+}
+
+func (f *fakePromos) Release(_ context.Context, orderID string) error {
+	f.released = append(f.released, orderID)
+	return nil
 }
 
 // fakeRecipes stands in for menu-service recipes. Dishes absent from the map
@@ -363,7 +384,7 @@ func setup() (*UseCases, *fakeOrderRepo, *fakePayments, *fakePromos) {
 	orders := newFakeOrderRepo()
 	payments := newFakePayments()
 	promos := newFakePromos()
-	return NewUseCases(orders, payments, promos, domain.NoopPublisher{}, newFakeRecipes(), newFakeStock(), echoCatalog{}), orders, payments, promos
+	return NewUseCases(Deps{Orders: orders, Payments: payments, Promos: promos, Recipes: newFakeRecipes(), Stock: newFakeStock(), Catalog: echoCatalog{}}), orders, payments, promos
 }
 
 // setupStock builds use cases whose recipes/stock fakes the test can drive.
@@ -372,7 +393,7 @@ func setupStock() (*UseCases, *fakeOrderRepo, *fakePromos, *fakeRecipes, *fakeSt
 	promos := newFakePromos()
 	recipes := newFakeRecipes()
 	stock := newFakeStock()
-	return NewUseCases(orders, newFakePayments(), promos, domain.NoopPublisher{}, recipes, stock, echoCatalog{}), orders, promos, recipes, stock
+	return NewUseCases(Deps{Orders: orders, Payments: newFakePayments(), Promos: promos, Recipes: recipes, Stock: stock, Catalog: echoCatalog{}}), orders, promos, recipes, stock
 }
 
 func placeTestOrder(t *testing.T, uc *UseCases) *domain.Order {
@@ -661,7 +682,7 @@ func TestCreatePaymentIntentFlow(t *testing.T) {
 	uc, orders, payments, _ := setup()
 	order := placeTestOrder(t, uc)
 
-	res, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	res, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	assert.Equal(t, order.TotalAmountCents, res.AmountCents)
 	assert.Equal(t, "eur", res.Currency)
@@ -672,7 +693,7 @@ func TestCreatePaymentIntentFlow(t *testing.T) {
 
 	// Idempotency is now guaranteed by payment-service (see its own test
 	// suite): order-service simply asks again and gets the same intent back.
-	res2, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	res2, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	assert.Equal(t, res.IntentID, res2.IntentID)
 }
@@ -681,7 +702,7 @@ func TestCreatePaymentIntentOnlyOwner(t *testing.T) {
 	uc, _, _, _ := setup()
 	order := placeTestOrder(t, uc)
 
-	_, err := uc.CreatePaymentIntent(context.Background(), otherCust, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), otherCust, order.ID, "")
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
@@ -694,7 +715,7 @@ func TestCreatePaymentIntentWrongState(t *testing.T) {
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusConfirmed
 
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeConflict, derr.Code)
@@ -705,7 +726,7 @@ func TestCreatePaymentIntentWrongState(t *testing.T) {
 func TestConfirmOrderSuccess(t *testing.T) {
 	uc, orders, _, _ := setup()
 	order := placeTestOrder(t, uc)
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 
 	confirmed, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
@@ -736,7 +757,7 @@ func TestConfirmOrderRedeemsPromoOnlyOnce(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	intent, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	intent, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	assert.Equal(t, order.AmountDueCents(), intent.AmountCents, "payment-service is charged the discounted amount")
 
@@ -756,7 +777,7 @@ func TestConfirmOrderRedeemsPromoOnlyOnce(t *testing.T) {
 func TestConfirmOrderPaymentNotCompleted(t *testing.T) {
 	uc, _, payments, _ := setup()
 	order := placeTestOrder(t, uc)
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 
 	payments.status = "FAILED"
@@ -773,7 +794,57 @@ func TestConfirmOrderWithoutIntent(t *testing.T) {
 	_, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeConflict, derr.Code, "a PLACED order is not awaiting payment yet")
+}
+
+// The vulnerability being closed: paying less than the order (an intent
+// created for another amount) must never confirm it.
+func TestConfirmOrderRefusesPaymentOfAnotherAmount(t *testing.T) {
+	uc, orders, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+	payments.paidCents = 1
+
+	_, err = uc.ConfirmOrder(context.Background(), customer, order.ID)
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodePayment, derr.Code)
+	stored, _ := orders.GetByID(context.Background(), order.ID)
+	assert.Equal(t, domain.StatusPaymentPending, stored.Status)
+}
+
+func TestCreatePaymentIntentSendsTheOrderAmountAndCustomer(t *testing.T) {
+	uc, _, payments, _ := setup()
+	order := placeTestOrder(t, uc)
+
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "card-1")
+
+	require.NoError(t, err)
+	req := payments.created[order.ID]
+	assert.Equal(t, order.AmountDueCents(), req.AmountCents)
+	assert.Equal(t, customer.UserID, req.CustomerID)
+	assert.Equal(t, "eur", req.Currency)
+	assert.Equal(t, "card-1", req.PaymentMethodID)
+}
+
+func TestConfirmOrderSurvivesPromoRedemptionFailure(t *testing.T) {
+	uc, _, _, promos := setup()
+	promos.codes["WELCOME10"] = 10
+	order, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{
+		RestaurantID: "resto-1", DeliveryAddress: "12 rue de Paris", PromoCode: "WELCOME10",
+		Items: []domain.NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 1000}},
+	})
+	require.NoError(t, err)
+	_, err = uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
+	require.NoError(t, err)
+	delete(promos.codes, "WELCOME10") // the code vanished between preview and payment
+
+	confirmed, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
+
+	require.NoError(t, err, "the customer paid: the order is confirmed")
+	assert.Equal(t, domain.StatusConfirmed, confirmed.Status)
 }
 
 // ── UpdateOrderStatus ───────────────────────────────────────
@@ -782,7 +853,7 @@ func TestConfirmOrderWithoutIntent(t *testing.T) {
 func confirmOrder(t *testing.T, uc *UseCases) *domain.Order {
 	t.Helper()
 	order := placeTestOrder(t, uc)
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	confirmed, err := uc.ConfirmOrder(context.Background(), customer, order.ID)
 	require.NoError(t, err)
@@ -920,7 +991,7 @@ func (f *fakePublisher) PublishOrderReady(_ context.Context, e domain.OrderReady
 }
 
 func setupWithPublisher(pub domain.EventPublisher) *UseCases {
-	return NewUseCases(newFakeOrderRepo(), newFakePayments(), newFakePromos(), pub, newFakeRecipes(), newFakeStock(), echoCatalog{})
+	return NewUseCases(Deps{Orders: newFakeOrderRepo(), Payments: newFakePayments(), Promos: newFakePromos(), Events: pub, Recipes: newFakeRecipes(), Stock: newFakeStock(), Catalog: echoCatalog{}})
 }
 
 func TestUpdateOrderStatusPublishesOnlyWhenReady(t *testing.T) {
@@ -974,7 +1045,7 @@ func placeStockOrder(t *testing.T, uc *UseCases, items ...domain.NewOrderItemInp
 
 func payAndConfirm(t *testing.T, uc *UseCases, orderID string) *domain.Order {
 	t.Helper()
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, orderID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, orderID, "")
 	require.NoError(t, err)
 	confirmed, err := uc.ConfirmOrder(context.Background(), customer, orderID)
 	require.NoError(t, err)
@@ -1173,7 +1244,7 @@ func TestCancelBeforePaymentNeverCallsStock(t *testing.T) {
 			recipes.recipes["11111111-1111-4111-8111-111111111111"] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
 			order := placeStockOrder(t, uc, burger(1))
 			if pending {
-				_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+				_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 				require.NoError(t, err)
 			}
 
@@ -1514,7 +1585,7 @@ func TestCancelBuiltFromStalePaymentPendingReadStillRestores(t *testing.T) {
 				stock.consumeErr = errors.New("down")
 			}
 			order := placeStockOrder(t, uc, burger(1))
-			_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+			_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 			require.NoError(t, err)
 			orders.beforeWrite = func() { payAndConfirm(t, uc, order.ID) }
 
@@ -1538,7 +1609,7 @@ func TestLateDuplicateConfirmAfterCancelDoesNotResetTheOrder(t *testing.T) {
 	uc, orders, _, recipes, stock := setupStock()
 	steakRecipe(recipes)
 	order := placeStockOrder(t, uc, burger(1))
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	orders.beforeWrite = func() {
 		payAndConfirm(t, uc, order.ID)
@@ -1562,7 +1633,7 @@ func TestConcurrentDuplicateConfirmIsIdempotentAndConsumesOnce(t *testing.T) {
 	uc, orders, _, recipes, stock := setupStock()
 	steakRecipe(recipes)
 	order := placeStockOrder(t, uc, burger(1))
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 	orders.beforeWrite = func() { payAndConfirm(t, uc, order.ID) }
 
@@ -1620,7 +1691,7 @@ func TestStatusUpdateAlreadyAppliedConcurrentlyIsNotAConflict(t *testing.T) {
 	order := placeStockOrder(t, uc, burger(1))
 	orders.beforeWrite = func() { orders.orders[order.ID].Status = domain.StatusPaymentPending }
 
-	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID)
+	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 
 	require.NoError(t, err)
 	stored, _ := orders.GetByID(context.Background(), order.ID)

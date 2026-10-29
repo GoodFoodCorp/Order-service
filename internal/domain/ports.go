@@ -38,6 +38,17 @@ type OrderRepository interface {
 	ListByStockSync(ctx context.Context, states []StockSyncState, limit int) ([]Order, error)
 }
 
+// PaymentIntentRequest asks payment-service to charge an order. The amount
+// is always the one this service priced: payment-service has no other source.
+type PaymentIntentRequest struct {
+	OrderID     string
+	CustomerID  string
+	AmountCents int64
+	Currency    string
+	// PaymentMethodID optionally selects one of the customer's saved cards.
+	PaymentMethodID string
+}
+
 // PaymentIntent is what payment-service returns when an intent is created.
 type PaymentIntent struct {
 	ID           string
@@ -47,13 +58,29 @@ type PaymentIntent struct {
 	Currency     string
 }
 
-// PaymentService is the outbound port to payment-service, which owns Stripe
-// and the payment records. The caller's JWT is forwarded on every call.
-// Future EBICS integration would be a sibling port, keeping the domain
-// provider-agnostic.
+// PaymentStatusSucceeded is payment-service's status of a captured payment.
+const PaymentStatusSucceeded = "SUCCEEDED"
+
+// Payment is payment-service's record of an order's payment.
+type Payment struct {
+	OrderID     string
+	CustomerID  string
+	Status      string
+	AmountCents int64
+	Currency    string
+}
+
+// PaymentService is the outbound port to payment-service (internal API,
+// service key). Future EBICS integration would be a sibling port, keeping the
+// domain provider-agnostic.
 type PaymentService interface {
-	CreateIntent(ctx context.Context, token, orderID string, amountCents int64, currency string) (*PaymentIntent, error)
-	Confirm(ctx context.Context, token, orderID string) (string, error)
+	CreateIntent(ctx context.Context, req PaymentIntentRequest) (*PaymentIntent, error)
+	// GetPayment returns the order's payment reconciled with the provider; a
+	// missing payment is a NOT_FOUND error.
+	GetPayment(ctx context.Context, orderID string) (*Payment, error)
+	// Refund pays a cancelled order back, or closes its unpaid intent.
+	// Idempotent; a missing payment is a NOT_FOUND error.
+	Refund(ctx context.Context, orderID string) error
 }
 
 // PromoPreview is what promo-service returns for a code that is currently
@@ -64,14 +91,17 @@ type PromoPreview struct {
 }
 
 // PromoService is the outbound port to promo-service, which owns promo codes
-// and their redemptions. The caller's JWT is forwarded on every call.
+// and their redemptions.
 type PromoService interface {
 	// Preview validates a code without consuming it — safe to call repeatedly
-	// while the customer is still assembling their order.
+	// while the customer is still assembling their order. The customer's JWT
+	// is forwarded.
 	Preview(ctx context.Context, token, code string, orderAmountCents int64) (*PromoPreview, error)
-	// Redeem atomically consumes one usage of the code for this order.
-	// Idempotent per orderID: retries never double-consume.
-	Redeem(ctx context.Context, token, code, orderID string, orderAmountCents int64) (int64, error)
+	// Redeem atomically consumes one usage of the code for this paid order
+	// (internal API). Idempotent per orderID: retries never double-consume.
+	Redeem(ctx context.Context, code, orderID, customerID string, orderAmountCents int64) (int64, error)
+	// Release gives back the usage of a cancelled, refunded order. Idempotent.
+	Release(ctx context.Context, orderID string) error
 }
 
 // MenuCatalog is the price authority. What the browser sends is never trusted

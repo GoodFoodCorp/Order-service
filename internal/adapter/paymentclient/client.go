@@ -1,6 +1,7 @@
-// Package paymentclient talks to payment-service, which owns Stripe and all
-// payment records (extracted from this service). The customer's own JWT is
-// forwarded so payments stay attributable to them.
+// Package paymentclient talks to payment-service's internal API (service key),
+// which owns Stripe and every payment record. This service is the only one
+// allowed to create, reconcile or refund a payment, always for the amount it
+// priced itself.
 package paymentclient
 
 import (
@@ -8,39 +9,52 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"goodfood/order-service/internal/domain"
 )
 
+const serviceKeyHeader = "X-Service-Key"
+
 type Client struct {
-	baseURL string
-	http    *http.Client
+	baseURL    string
+	serviceKey string
+	http       *http.Client
 }
 
-func New(baseURL string) *Client {
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: 10 * time.Second}}
+func New(baseURL, serviceKey string, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &Client{baseURL: baseURL, serviceKey: serviceKey, http: httpClient}
 }
 
 type paymentResponse struct {
 	OrderID      string `json:"order_id"`
+	CustomerID   string `json:"customer_id"`
 	IntentID     string `json:"intent_id"`
 	ClientSecret string `json:"client_secret"`
 	Status       string `json:"status"`
 	AmountCents  int64  `json:"amount_cents"`
 	Currency     string `json:"currency"`
-	Error        string `json:"error"`
 }
 
-func (c *Client) CreateIntent(ctx context.Context, token, orderID string, amountCents int64, currency string) (*domain.PaymentIntent, error) {
-	body, _ := json.Marshal(map[string]any{
-		"order_id":     orderID,
-		"amount_cents": amountCents,
-		"currency":     currency,
+func (c *Client) CreateIntent(ctx context.Context, req domain.PaymentIntentRequest) (*domain.PaymentIntent, error) {
+	body, err := json.Marshal(map[string]any{
+		"order_id":          req.OrderID,
+		"customer_id":       req.CustomerID,
+		"amount_cents":      req.AmountCents,
+		"currency":          req.Currency,
+		"payment_method_id": req.PaymentMethodID,
 	})
-	out, err := c.do(ctx, http.MethodPost, "/api/payments/intents", token, body)
 	if err != nil {
+		return nil, err
+	}
+	var out paymentResponse
+	if err := c.do(ctx, http.MethodPost, "/internal/payments/intents", body, &out); err != nil {
 		return nil, err
 	}
 	return &domain.PaymentIntent{
@@ -52,47 +66,58 @@ func (c *Client) CreateIntent(ctx context.Context, token, orderID string, amount
 	}, nil
 }
 
-// Confirm asks payment-service to verify the payment with the provider.
-// Returns the resulting payment status (e.g. "SUCCEEDED").
-func (c *Client) Confirm(ctx context.Context, token, orderID string) (string, error) {
-	out, err := c.do(ctx, http.MethodPost, "/api/payments/"+orderID+"/confirm", token, nil)
-	if err != nil {
-		return "", err
-	}
-	return out.Status, nil
-}
-
-func (c *Client) do(ctx context.Context, method, path, token string, body []byte) (*paymentResponse, error) {
-	var reader *bytes.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	} else {
-		reader = bytes.NewReader([]byte{})
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
-	if err != nil {
+func (c *Client) GetPayment(ctx context.Context, orderID string) (*domain.Payment, error) {
+	var out paymentResponse
+	if err := c.do(ctx, http.MethodGet, "/internal/payments/"+url.PathEscape(orderID), nil, &out); err != nil {
 		return nil, err
 	}
+	return &domain.Payment{
+		OrderID:     out.OrderID,
+		CustomerID:  out.CustomerID,
+		Status:      out.Status,
+		AmountCents: out.AmountCents,
+		Currency:    out.Currency,
+	}, nil
+}
+
+func (c *Client) Refund(ctx context.Context, orderID string) error {
+	return c.do(ctx, http.MethodPost, "/internal/payments/"+url.PathEscape(orderID)+"/refund", nil, nil)
+}
+
+// do sends one call. A 404 becomes a domain NOT_FOUND error (no payment for
+// this order); any other non-2xx carries payment-service's message.
+func (c *Client) do(ctx context.Context, method, path string, body []byte, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set(serviceKeyHeader, c.serviceKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("payment-service unreachable: %w", err)
+		return fmt.Errorf("payment-service unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 
-	var out paymentResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("invalid payment-service response: %w", err)
+	if resp.StatusCode == http.StatusNotFound {
+		return domain.NewNotFoundError("no payment for this order")
 	}
-	if resp.StatusCode >= 300 {
-		message := out.Error
-		if message == "" {
-			message = fmt.Sprintf("payment-service returned %d", resp.StatusCode)
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var e struct {
+			Error string `json:"error"`
 		}
-		return nil, fmt.Errorf("%s", message)
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e)
+		if e.Error == "" {
+			e.Error = fmt.Sprintf("payment-service returned %d", resp.StatusCode)
+		}
+		return fmt.Errorf("%s", e.Error)
 	}
-	return &out, nil
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("invalid payment-service response: %w", err)
+	}
+	return nil
 }

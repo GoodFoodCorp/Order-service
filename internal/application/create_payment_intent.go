@@ -13,9 +13,14 @@ type PaymentIntentOutput struct {
 	Currency     string
 }
 
+// orderCurrency is the only currency the platform sells in.
+const orderCurrency = "eur"
+
 // CreatePaymentIntent delegates to payment-service (which owns Stripe and the
-// payment record) and moves the order to PAYMENT_PENDING.
-func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderID string) (*PaymentIntentOutput, error) {
+// payment record) and moves the order to PAYMENT_PENDING. The amount sent is
+// the order's own amount due: the customer only chooses the order to pay and,
+// optionally, one of their saved cards.
+func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderID, paymentMethodID string) (*PaymentIntentOutput, error) {
 	order, err := uc.orders.GetByID(ctx, orderID)
 	if err != nil {
 		return nil, err
@@ -27,8 +32,13 @@ func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderI
 		return nil, domain.NewConflictError("order is not awaiting payment")
 	}
 
-	const currency = "eur"
-	intent, err := uc.payments.CreateIntent(ctx, actor.Token, order.ID, order.AmountDueCents(), currency)
+	intent, err := uc.payments.CreateIntent(ctx, domain.PaymentIntentRequest{
+		OrderID:         order.ID,
+		CustomerID:      order.CustomerID,
+		AmountCents:     order.AmountDueCents(),
+		Currency:        orderCurrency,
+		PaymentMethodID: paymentMethodID,
+	})
 	if err != nil {
 		return nil, domain.NewPaymentError(err.Error())
 	}
@@ -46,6 +56,6 @@ func (uc *UseCases) CreatePaymentIntent(ctx context.Context, actor Actor, orderI
 		IntentID:     intent.ID,
 		ClientSecret: intent.ClientSecret,
 		AmountCents:  order.AmountDueCents(),
-		Currency:     currency,
+		Currency:     orderCurrency,
 	}, nil
 }

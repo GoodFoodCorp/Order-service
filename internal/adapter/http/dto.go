@@ -30,6 +30,15 @@ type updateStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// paymentIntentRequest optionally selects one of the customer's saved cards.
+// It deliberately has no amount: the order decides what is charged.
+type paymentIntentRequest struct {
+	PaymentMethodID string `json:"payment_method_id"`
+}
+
+// maxBodyBytes bounds every JSON body this service reads.
+const maxBodyBytes = 1 << 20
+
 // ── Responses ───────────────────────────────────────────────
 
 type orderItemResponse struct {
