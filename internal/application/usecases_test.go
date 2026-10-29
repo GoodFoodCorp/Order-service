@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -48,10 +49,25 @@ func newFakeOrderRepo() *fakeOrderRepo {
 }
 
 func (f *fakeOrderRepo) Create(_ context.Context, o *domain.Order) error {
+	if o.IdempotencyKey != nil {
+		if _, err := f.GetByIdempotencyKey(context.Background(), o.CustomerID, *o.IdempotencyKey); err == nil {
+			return domain.NewConflictError("an order already exists for this idempotency key")
+		}
+	}
 	cp := *o
 	f.orders[o.ID] = &cp
 	f.seq[o.ID] = len(f.seq)
 	return nil
+}
+
+func (f *fakeOrderRepo) GetByIdempotencyKey(_ context.Context, customerID, key string) (*domain.Order, error) {
+	for _, o := range f.orders {
+		if o.CustomerID == customerID && o.IdempotencyKey != nil && *o.IdempotencyKey == key {
+			cp := *o
+			return &cp, nil
+		}
+	}
+	return nil, domain.NewNotFoundError("order not found")
 }
 
 func (f *fakeOrderRepo) GetByID(_ context.Context, id string) (*domain.Order, error) {
@@ -63,7 +79,7 @@ func (f *fakeOrderRepo) GetByID(_ context.Context, id string) (*domain.Order, er
 	return &cp, nil
 }
 
-func (f *fakeOrderRepo) ListByCustomer(_ context.Context, customerID string) ([]domain.Order, error) {
+func (f *fakeOrderRepo) ListByCustomer(_ context.Context, customerID string, _ domain.ListFilter) ([]domain.Order, error) {
 	out := []domain.Order{}
 	for _, o := range f.orders {
 		if o.CustomerID == customerID {
@@ -73,7 +89,7 @@ func (f *fakeOrderRepo) ListByCustomer(_ context.Context, customerID string) ([]
 	return out, nil
 }
 
-func (f *fakeOrderRepo) ListByRestaurant(_ context.Context, restaurantID string) ([]domain.Order, error) {
+func (f *fakeOrderRepo) ListByRestaurant(_ context.Context, restaurantID string, _ domain.ListFilter) ([]domain.Order, error) {
 	out := []domain.Order{}
 	for _, o := range f.orders {
 		if o.RestaurantID == restaurantID {
@@ -714,16 +730,16 @@ func TestListCustomerOrders(t *testing.T) {
 	uc, _, _, _ := setup()
 	placeTestOrder(t, uc)
 
-	own, err := uc.ListCustomerOrders(context.Background(), customer, "")
+	own, err := uc.ListCustomerOrders(context.Background(), customer, "", domain.NewListFilter(0, 0, nil))
 	require.NoError(t, err)
 	assert.Len(t, own, 1)
 
 	// A customer cannot list someone else's orders...
-	_, err = uc.ListCustomerOrders(context.Background(), otherCust, customer.UserID)
+	_, err = uc.ListCustomerOrders(context.Background(), otherCust, customer.UserID, domain.NewListFilter(0, 0, nil))
 	require.Error(t, err)
 
 	// ...but head office can.
-	all, err := uc.ListCustomerOrders(context.Background(), admin, customer.UserID)
+	all, err := uc.ListCustomerOrders(context.Background(), admin, customer.UserID, domain.NewListFilter(0, 0, nil))
 	require.NoError(t, err)
 	assert.Len(t, all, 1)
 }
@@ -735,19 +751,19 @@ func TestListRestaurantOrders(t *testing.T) {
 	placeTestOrder(t, uc)
 
 	// The restaurant's manager sees its orders...
-	list, err := uc.ListRestaurantOrders(context.Background(), manager, "resto-1")
+	list, err := uc.ListRestaurantOrders(context.Background(), manager, "resto-1", domain.NewListFilter(0, 0, nil))
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
 
 	// ...another restaurant's manager does not.
 	other := Actor{UserID: "mgr-2", TenantID: "resto-99", RoleSlugs: []string{RoleManager}}
-	_, err = uc.ListRestaurantOrders(context.Background(), other, "resto-1")
+	_, err = uc.ListRestaurantOrders(context.Background(), other, "resto-1", domain.NewListFilter(0, 0, nil))
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
 
 	// Customers cannot list restaurant orders at all.
-	_, err = uc.ListRestaurantOrders(context.Background(), customer, "resto-1")
+	_, err = uc.ListRestaurantOrders(context.Background(), customer, "resto-1", domain.NewListFilter(0, 0, nil))
 	require.Error(t, err)
 }
 
@@ -1984,4 +2000,34 @@ func TestCustomerCancellationRules(t *testing.T) {
 	cancelled, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusCancelled, cancelled.Status)
+}
+
+// ── Idempotent creation ─────────────────────────────────────
+
+func TestPlaceOrderWithTheSameIdempotencyKeyReturnsTheSameOrder(t *testing.T) {
+	uc, orders, _, _ := setup()
+	in := PlaceOrderInput{
+		RestaurantID: "resto-1", DeliveryAddress: "12 rue de Paris", IdempotencyKey: "checkout-42",
+		Items: []domain.NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 1000}},
+	}
+
+	first, err := uc.PlaceOrder(context.Background(), customer, in)
+	require.NoError(t, err)
+	second, err := uc.PlaceOrder(context.Background(), customer, in)
+	require.NoError(t, err)
+
+	assert.Equal(t, first.ID, second.ID)
+	assert.Len(t, orders.orders, 1, "a double submission places one order")
+
+	other, err := uc.PlaceOrder(context.Background(), otherCust, in)
+	require.NoError(t, err)
+	assert.NotEqual(t, first.ID, other.ID, "keys are scoped to the customer")
+}
+
+func TestPlaceOrderRejectsAnOversizedIdempotencyKey(t *testing.T) {
+	uc, _, _, _ := setup()
+	_, err := uc.PlaceOrder(context.Background(), customer, PlaceOrderInput{IdempotencyKey: strings.Repeat("k", 200)})
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
 }

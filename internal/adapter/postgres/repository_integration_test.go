@@ -174,3 +174,74 @@ func TestCancellationMarksRefundPendingFromPaymentOn(t *testing.T) {
 		}
 	}
 }
+
+func TestRestaurantListingIsPaginatedFilteredAndLoadsItems(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	restaurant := uuid.NewString()
+	for _, status := range []domain.OrderStatus{domain.StatusConfirmed, domain.StatusConfirmed, domain.StatusDelivered} {
+		o := newStoredOrder(t, repo, status)
+		if _, err := repo.pool.Exec(ctx, `UPDATE orders SET restaurant_id = $1 WHERE id = $2`, restaurant, o.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	page, err := repo.ListByRestaurant(ctx, restaurant, domain.NewListFilter(2, 0, nil))
+	if err != nil || len(page) != 2 {
+		t.Fatalf("got %d %v", len(page), err)
+	}
+	for _, o := range page {
+		if len(o.Items) != 2 {
+			t.Fatalf("order %s has %d items, want 2", o.ID, len(o.Items))
+		}
+	}
+	confirmed, _ := repo.ListByRestaurant(ctx, restaurant, domain.NewListFilter(50, 0, []domain.OrderStatus{domain.StatusConfirmed}))
+	if len(confirmed) != 2 {
+		t.Fatalf("status filter: got %d", len(confirmed))
+	}
+	rest, _ := repo.ListByRestaurant(ctx, restaurant, domain.NewListFilter(2, 2, nil))
+	if len(rest) != 1 {
+		t.Fatalf("second page: got %d", len(rest))
+	}
+}
+
+func TestIdempotencyKeyIsUniquePerCustomer(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	key := "checkout-" + uuid.NewString()
+	first, _ := domain.NewOrder(uuid.NewString(), uuid.NewString(), "addr", []domain.NewOrderItemInput{
+		{MenuItemID: uuid.NewString(), MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 100}})
+	first.IdempotencyKey = &key
+	if err := repo.Create(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	dup, _ := domain.NewOrder(first.CustomerID, first.RestaurantID, "addr", []domain.NewOrderItemInput{
+		{MenuItemID: uuid.NewString(), MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 100}})
+	dup.IdempotencyKey = &key
+	if err := repo.Create(ctx, dup); err == nil {
+		t.Fatal("same customer and key must conflict")
+	}
+	got, err := repo.GetByIdempotencyKey(ctx, first.CustomerID, key)
+	if err != nil || got.ID != first.ID {
+		t.Fatalf("got %v %v", got, err)
+	}
+}
+
+func TestLockerRunsTheJobOnOneHolderAtATime(t *testing.T) {
+	ctx := context.Background()
+	repo := setupRepo(t)
+	locker := NewLocker(repo.pool)
+	inner := false
+	ran, err := locker.RunExclusive(ctx, 4242, func(ctx context.Context) {
+		inner, _ = locker.RunExclusive(ctx, 4242, func(context.Context) {})
+	})
+	if err != nil || !ran {
+		t.Fatalf("outer: %v %v", ran, err)
+	}
+	if inner {
+		t.Fatal("a second holder must skip while the lock is held")
+	}
+	if ran, _ := locker.RunExclusive(ctx, 4242, func(context.Context) {}); !ran {
+		t.Fatal("the lock must be released after the job")
+	}
+}

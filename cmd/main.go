@@ -80,7 +80,7 @@ func main() {
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go runStockRetry(runCtx, log, uc)
+	go runStockRetry(runCtx, log, uc, postgres.NewLocker(pool))
 
 	if cfg.RabbitMQURL != "" {
 		publisher := messaging.NewAMQPPublisher(cfg.RabbitMQURL)
@@ -115,8 +115,13 @@ func main() {
 	log.Info().Msg("order-service stopped")
 }
 
-// runStockRetry replays pending stock synchronisation until ctx ends.
-func runStockRetry(ctx context.Context, log zerolog.Logger, uc *application.UseCases) {
+// syncWorkerLock identifies the retry worker's advisory lock: one replica
+// runs each pass, the others skip it.
+const syncWorkerLock int64 = 0x6f72646572 // "order"
+
+// runStockRetry replays pending stock synchronisation and refunds until ctx
+// ends.
+func runStockRetry(ctx context.Context, log zerolog.Logger, uc *application.UseCases, locker *postgres.Locker) {
 	timer := time.NewTimer(stockRetryFirstDelay)
 	defer timer.Stop()
 	for {
@@ -124,9 +129,16 @@ func runStockRetry(ctx context.Context, log zerolog.Logger, uc *application.UseC
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			n := uc.RetryStockSync(ctx, stockRetryBatch)
-			r := uc.RetryRefunds(ctx, stockRetryBatch)
-			log.Debug().Int("stock", n).Int("refunds", r).Msg("sync retry pass done")
+			ran, err := locker.RunExclusive(ctx, syncWorkerLock, func(ctx context.Context) {
+				n := uc.RetryStockSync(ctx, stockRetryBatch)
+				r := uc.RetryRefunds(ctx, stockRetryBatch)
+				log.Debug().Int("stock", n).Int("refunds", r).Msg("sync retry pass done")
+			})
+			if err != nil && ctx.Err() == nil {
+				log.Warn().Err(err).Msg("sync retry pass skipped")
+			} else if !ran {
+				log.Debug().Msg("sync retry pass running on another replica")
+			}
 			timer.Reset(stockRetryInterval)
 		}
 	}

@@ -5,19 +5,23 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"goodfood/order-service/internal/domain"
 )
 
 // orderCols lists the order columns every read selects, in orderDest order.
-const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync`
+const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync, idempotency_key`
 
 // orderDest returns the scan destinations matching orderCols.
 func orderDest(o *domain.Order) []any {
 	return []any{&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
-		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync}
+		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync, &o.IdempotencyKey}
 }
+
+// uniqueViolation is PostgreSQL's SQLSTATE for a unique constraint violation.
+const uniqueViolation = "23505"
 
 type OrderRepository struct {
 	pool *pgxpool.Pool
@@ -35,23 +39,28 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	defer tx.Rollback(ctx) //nolint:errcheck // rollback after commit is a no-op
 
 	_, err = tx.Exec(ctx,
-		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		`INSERT INTO orders (id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, idempotency_key)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		order.ID, order.CustomerID, order.RestaurantID, order.Status,
 		order.TotalAmountCents, order.DeliveryAddress, order.PlacedAt, order.ConfirmedAt,
-		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync))
+		order.PromoCode, order.DiscountCents, stockSyncOrNone(order.StockSync), order.IdempotencyKey)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
+		return domain.NewConflictError("an order already exists for this idempotency key")
+	}
 	if err != nil {
 		return err
 	}
 
+	// One round trip for all the lines.
+	batch := &pgx.Batch{}
 	for _, it := range order.Items {
-		_, err = tx.Exec(ctx,
-			`INSERT INTO order_items (id, order_id, menu_item_id, menu_item_name, quantity, unit_price_cents, special_instructions)
+		batch.Queue(`INSERT INTO order_items (id, order_id, menu_item_id, menu_item_name, quantity, unit_price_cents, special_instructions)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 			it.ID, it.OrderID, it.MenuItemID, it.MenuItemName, it.Quantity, it.UnitPriceCents, it.SpecialInstructions)
-		if err != nil {
-			return err
-		}
+	}
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
 }
@@ -77,16 +86,38 @@ func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order
 	return &o, nil
 }
 
-func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string) ([]domain.Order, error) {
+func (r *OrderRepository) ListByCustomer(ctx context.Context, customerID string, f domain.ListFilter) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT ` + orderCols + `
-		 FROM orders WHERE customer_id = $1 ORDER BY placed_at DESC`, customerID)
+		`SELECT `+orderCols+` FROM orders
+		 WHERE customer_id = $1 AND (cardinality($2::text[]) = 0 OR status = ANY($2))
+		 ORDER BY placed_at DESC LIMIT $3 OFFSET $4`, customerID, statusStrings(f.Statuses), f.Limit, f.Offset)
 }
 
-func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string) ([]domain.Order, error) {
+func (r *OrderRepository) ListByRestaurant(ctx context.Context, restaurantID string, f domain.ListFilter) ([]domain.Order, error) {
 	return r.list(ctx,
-		`SELECT ` + orderCols + `
-		 FROM orders WHERE restaurant_id = $1 ORDER BY placed_at DESC`, restaurantID)
+		`SELECT `+orderCols+` FROM orders
+		 WHERE restaurant_id = $1 AND (cardinality($2::text[]) = 0 OR status = ANY($2))
+		 ORDER BY placed_at DESC LIMIT $3 OFFSET $4`, restaurantID, statusStrings(f.Statuses), f.Limit, f.Offset)
+}
+
+func (r *OrderRepository) GetByIdempotencyKey(ctx context.Context, customerID, key string) (*domain.Order, error) {
+	orders, err := r.list(ctx,
+		`SELECT `+orderCols+` FROM orders WHERE customer_id = $1 AND idempotency_key = $2`, customerID, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(orders) == 0 {
+		return nil, domain.NewNotFoundError("order not found")
+	}
+	return &orders[0], nil
+}
+
+func statusStrings(statuses []domain.OrderStatus) []string {
+	out := make([]string, len(statuses))
+	for i, s := range statuses {
+		out[i] = string(s)
+	}
+	return out
 }
 
 func (r *OrderRepository) ListByStatuses(ctx context.Context, statuses ...domain.OrderStatus) ([]domain.Order, error) {
@@ -258,15 +289,42 @@ func (r *OrderRepository) list(ctx context.Context, query string, args ...any) (
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Load items for each order (lists stay small in the POC).
-	for i := range orders {
-		items, err := r.loadItems(ctx, orders[i].ID)
-		if err != nil {
-			return nil, err
-		}
-		orders[i].Items = items
+	if err := r.attachItems(ctx, orders); err != nil {
+		return nil, err
 	}
 	return orders, nil
+}
+
+// attachItems loads the lines of every listed order in a single query (no
+// N+1 round trips, whatever the page size).
+func (r *OrderRepository) attachItems(ctx context.Context, orders []domain.Order) error {
+	if len(orders) == 0 {
+		return nil
+	}
+	ids := make([]string, len(orders))
+	index := make(map[string]int, len(orders))
+	for i := range orders {
+		ids[i] = orders[i].ID
+		index[orders[i].ID] = i
+		orders[i].Items = []domain.OrderItem{}
+	}
+	rows, err := r.pool.Query(ctx,
+		`SELECT id, order_id, menu_item_id, menu_item_name, quantity, unit_price_cents, special_instructions
+		 FROM order_items WHERE order_id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var it domain.OrderItem
+		if err := rows.Scan(&it.ID, &it.OrderID, &it.MenuItemID, &it.MenuItemName,
+			&it.Quantity, &it.UnitPriceCents, &it.SpecialInstructions); err != nil {
+			return err
+		}
+		i := index[it.OrderID]
+		orders[i].Items = append(orders[i].Items, it)
+	}
+	return rows.Err()
 }
 
 func (r *OrderRepository) loadItems(ctx context.Context, orderID string) ([]domain.OrderItem, error) {

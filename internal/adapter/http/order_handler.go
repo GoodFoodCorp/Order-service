@@ -3,6 +3,8 @@ package http
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -42,6 +44,7 @@ func (h *OrderHandler) Create(w http.ResponseWriter, r *http.Request) {
 		DeliveryAddress: req.DeliveryAddress,
 		Items:           items,
 		PromoCode:       req.PromoCode,
+		IdempotencyKey:  r.Header.Get("Idempotency-Key"),
 	})
 	if err != nil {
 		writeDomainError(w, r, err)
@@ -60,26 +63,48 @@ func (h *OrderHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toOrderResponse(order))
 }
 
-// GET /api/orders?customerId=  |  GET /api/orders?restaurantId=
+// GET /api/orders?customerId=|restaurantId=&status=A,B&limit=&offset=
+//
+// Most recent first, 50 per page by default (200 max). A full page carries an
+// X-Next-Offset header pointing at the next one.
 func (h *OrderHandler) List(w http.ResponseWriter, r *http.Request) {
-	var (
-		orders []domain.Order
-		err    error
-	)
-	if restaurantID := r.URL.Query().Get("restaurantId"); restaurantID != "" {
-		orders, err = h.uc.ListRestaurantOrders(r.Context(), actorFrom(r), restaurantID)
+	q := r.URL.Query()
+	filter, err := listFilterFrom(q.Get("limit"), q.Get("offset"), q.Get("status"))
+	if err != nil {
+		writeDomainError(w, r, err)
+		return
+	}
+	var orders []domain.Order
+	if restaurantID := q.Get("restaurantId"); restaurantID != "" {
+		orders, err = h.uc.ListRestaurantOrders(r.Context(), actorFrom(r), restaurantID, filter)
 	} else {
-		orders, err = h.uc.ListCustomerOrders(r.Context(), actorFrom(r), r.URL.Query().Get("customerId"))
+		orders, err = h.uc.ListCustomerOrders(r.Context(), actorFrom(r), q.Get("customerId"), filter)
 	}
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
 	}
-	out := make([]orderResponse, 0, len(orders))
-	for i := range orders {
-		out = append(out, toOrderResponse(&orders[i]))
+	if len(orders) == filter.Limit {
+		w.Header().Set("X-Next-Offset", strconv.Itoa(filter.Offset+filter.Limit))
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeOrders(w, orders)
+}
+
+func listFilterFrom(limit, offset, statuses string) (domain.ListFilter, error) {
+	l, _ := strconv.Atoi(limit)
+	o, _ := strconv.Atoi(offset)
+	var parsed []domain.OrderStatus
+	for _, raw := range strings.Split(statuses, ",") {
+		if strings.TrimSpace(raw) == "" {
+			continue
+		}
+		s, err := domain.ParseOrderStatus(raw)
+		if err != nil {
+			return domain.ListFilter{}, err
+		}
+		parsed = append(parsed, s)
+	}
+	return domain.NewListFilter(l, o, parsed), nil
 }
 
 // POST /api/orders/{id}/payment-intent  [{payment_method_id}]

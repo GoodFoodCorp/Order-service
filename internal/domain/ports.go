@@ -4,10 +4,16 @@ import "context"
 
 // OrderRepository is the persistence port implemented by the postgres adapter.
 type OrderRepository interface {
+	// Create inserts the order and its lines; a second order with the same
+	// customer and idempotency key is a CONFLICT error.
 	Create(ctx context.Context, order *Order) error
 	GetByID(ctx context.Context, id string) (*Order, error)
-	ListByCustomer(ctx context.Context, customerID string) ([]Order, error)
-	ListByRestaurant(ctx context.Context, restaurantID string) ([]Order, error)
+	// ListByCustomer and ListByRestaurant return a page, most recent first.
+	ListByCustomer(ctx context.Context, customerID string, filter ListFilter) ([]Order, error)
+	ListByRestaurant(ctx context.Context, restaurantID string, filter ListFilter) ([]Order, error)
+	// GetByIdempotencyKey finds the order a customer created with that key;
+	// a missing one is a NOT_FOUND error.
+	GetByIdempotencyKey(ctx context.Context, customerID, key string) (*Order, error)
 	ListByStatuses(ctx context.Context, statuses ...OrderStatus) ([]Order, error)
 	// UpdateStatus writes order.Status (and confirmed_at) only if the persisted
 	// status still equals from, the status the caller read — a stale read can
