@@ -14,6 +14,7 @@ services:
       PROMO_SERVICE_URL: http://promo-service:8092
       STOCK_SERVICE_URL: http://stock-service:8083
       MENU_SERVICE_URL: http://menu-service:8085
+      FRANCHISE_SERVICE_URL: http://franchise-service:8089
       # Secret partagé pour les appels internes (Stock, Menu) — jamais loggé
       SERVICE_API_KEY: ${SERVICE_API_KEY:?SERVICE_API_KEY must be set (shared with Stock and Menu services)}
       # Broker du compose du Delivery-service (réseau partagé microservices-net)
