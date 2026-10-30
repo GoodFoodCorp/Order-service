@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 type Config struct {
@@ -21,6 +22,19 @@ type Config struct {
 	ServiceAPIKey       string
 	LogLevel            string
 	RabbitMQURL         string
+
+	// Invoices are emailed when SMTPHost is set (Mailpit locally).
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUser     string
+	SMTPPassword string
+	SMTPSender   string
+	FrontendURL  string
+	// The seller printed on every invoice.
+	CompanyName      string
+	CompanyAddress   string
+	CompanySIRET     string
+	CompanyVATNumber string
 }
 
 // Load reads the typed configuration from environment variables only
@@ -40,6 +54,16 @@ func Load() (*Config, error) {
 		ServiceAPIKey:       os.Getenv("SERVICE_API_KEY"),
 		LogLevel:            getEnv("LOG_LEVEL", "info"),
 		RabbitMQURL:         os.Getenv("RABBITMQ_URL"), // optional: empty disables event publishing
+		SMTPHost:            os.Getenv("SMTP_HOST"),
+		SMTPPort:            atoiOr(os.Getenv("SMTP_PORT"), 587),
+		SMTPUser:            os.Getenv("SMTP_USER"),
+		SMTPPassword:        os.Getenv("SMTP_PASSWORD"),
+		SMTPSender:          getEnv("SMTP_SENDER", "Good Food <no-reply@goodfood.fr>"),
+		FrontendURL:         getEnv("FRONTEND_URL", "http://localhost:3000"),
+		CompanyName:         getEnv("INVOICE_COMPANY_NAME", "Good Food"),
+		CompanyAddress:      getEnv("INVOICE_COMPANY_ADDRESS", "12 rue de la République, 75011 Paris"),
+		CompanySIRET:        os.Getenv("INVOICE_COMPANY_SIRET"),
+		CompanyVATNumber:    os.Getenv("INVOICE_COMPANY_VAT_NUMBER"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("DATABASE_URL is required")
@@ -56,6 +80,13 @@ func Load() (*Config, error) {
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func atoiOr(s string, fallback int) int {
+	if n, err := strconv.Atoi(s); err == nil && n > 0 {
+		return n
 	}
 	return fallback
 }

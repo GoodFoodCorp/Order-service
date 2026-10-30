@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"goodfood/order-service/internal/adapter/invoicedoc"
 	"goodfood/order-service/internal/application"
 	"goodfood/order-service/internal/domain"
 )
@@ -196,4 +197,22 @@ func (h *OrderHandler) ListReadyForDelivery(w http.ResponseWriter, r *http.Reque
 		out = append(out, toOrderResponse(&orders[i]))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// Invoice is the invoice of a paid order, as a printable page.
+func (h *OrderHandler) Invoice(w http.ResponseWriter, r *http.Request) {
+	inv, err := h.uc.GetInvoice(r.Context(), actorFrom(r), chi.URLParam(r, "id"))
+	if err != nil {
+		writeDomainError(w, r, err)
+		return
+	}
+	page, err := invoicedoc.HTML(inv)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "invoice could not be rendered")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'")
+	_, _ = w.Write(page)
 }

@@ -98,6 +98,7 @@ func (uc *UseCases) PlaceOrder(ctx context.Context, actor Actor, in PlaceOrderIn
 		}
 		return nil, err
 	}
+	uc.recordInvoiceCustomer(ctx, actor, order)
 	return order, nil
 }
 

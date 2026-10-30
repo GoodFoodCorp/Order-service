@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"goodfood/order-service/internal/domain"
@@ -81,4 +82,35 @@ func (c *Client) Quote(ctx context.Context, restaurantID, deliveryAddress string
 		DropoffLat:        out.DropoffLatitude,
 		DropoffLng:        out.DropoffLongitude,
 	}, nil
+}
+
+type restaurantResponse struct {
+	Name    string `json:"name"`
+	Address string `json:"address"`
+	City    string `json:"city"`
+}
+
+// Describe names a restaurant on its invoices (public endpoint).
+func (c *Client) Describe(ctx context.Context, restaurantID string) (string, string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/restaurants/"+url.PathEscape(restaurantID), nil)
+	if err != nil {
+		return "", "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("franchise-service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return "", "", fmt.Errorf("franchise-service returned %d", resp.StatusCode)
+	}
+	var out restaurantResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", "", fmt.Errorf("invalid franchise-service response: %w", err)
+	}
+	address := out.Address
+	if out.City != "" && !strings.Contains(strings.ToLower(address), strings.ToLower(out.City)) {
+		address = strings.TrimSpace(address + ", " + out.City)
+	}
+	return out.Name, address, nil
 }
