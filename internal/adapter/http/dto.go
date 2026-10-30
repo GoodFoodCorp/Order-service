@@ -28,8 +28,23 @@ type createOrderRequest struct {
 	TipCents        int64                    `json:"tip_cents"`
 }
 
+// updateStatusRequest carries a reason when the new status is CANCELLED.
 type updateStatusRequest struct {
-	Status string `json:"status"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason"`
+	Comment string `json:"comment"`
+}
+
+type cancelRequest struct {
+	Reason  string `json:"reason"`
+	Comment string `json:"comment"`
+}
+
+type cancellationResponse struct {
+	By      string     `json:"by"`
+	Reason  string     `json:"reason"`
+	Comment string     `json:"comment,omitempty"`
+	At      *time.Time `json:"at,omitempty"`
 }
 
 // courierRequest identifies the courier delivery-service acts for.
@@ -64,25 +79,26 @@ type orderItemResponse struct {
 }
 
 type orderResponse struct {
-	ID               string              `json:"id"`
-	CustomerID       string              `json:"customer_id"`
-	RestaurantID     string              `json:"restaurant_id"`
-	Status           string              `json:"status"`
-	TotalAmountCents int64               `json:"total_amount_cents"`
-	DiscountCents    int64               `json:"discount_cents,omitempty"`
-	AmountDueCents   int64               `json:"amount_due_cents"`
-	PromoCode        *string             `json:"promo_code,omitempty"`
-	DeliveryAddress  string              `json:"delivery_address"`
-	Items            []orderItemResponse `json:"items"`
-	PlacedAt         time.Time           `json:"placed_at"`
-	ConfirmedAt      *time.Time          `json:"confirmed_at,omitempty"`
-	CourierID        *string             `json:"courier_id,omitempty"`
-	Fulfillment      string              `json:"fulfillment"`
-	DeliveryFeeCents int64               `json:"delivery_fee_cents"`
-	TipCents         int64               `json:"tip_cents"`
-	EstimatedMinutes int                 `json:"estimated_minutes,omitempty"`
-	DropoffLat       *float64            `json:"dropoff_lat,omitempty"`
-	DropoffLng       *float64            `json:"dropoff_lng,omitempty"`
+	ID               string                `json:"id"`
+	CustomerID       string                `json:"customer_id"`
+	RestaurantID     string                `json:"restaurant_id"`
+	Status           string                `json:"status"`
+	TotalAmountCents int64                 `json:"total_amount_cents"`
+	DiscountCents    int64                 `json:"discount_cents,omitempty"`
+	AmountDueCents   int64                 `json:"amount_due_cents"`
+	PromoCode        *string               `json:"promo_code,omitempty"`
+	DeliveryAddress  string                `json:"delivery_address"`
+	Items            []orderItemResponse   `json:"items"`
+	PlacedAt         time.Time             `json:"placed_at"`
+	ConfirmedAt      *time.Time            `json:"confirmed_at,omitempty"`
+	CourierID        *string               `json:"courier_id,omitempty"`
+	Fulfillment      string                `json:"fulfillment"`
+	DeliveryFeeCents int64                 `json:"delivery_fee_cents"`
+	TipCents         int64                 `json:"tip_cents"`
+	EstimatedMinutes int                   `json:"estimated_minutes,omitempty"`
+	DropoffLat       *float64              `json:"dropoff_lat,omitempty"`
+	DropoffLng       *float64              `json:"dropoff_lng,omitempty"`
+	Cancellation     *cancellationResponse `json:"cancellation,omitempty"`
 }
 
 type paymentIntentResponse struct {
@@ -109,6 +125,15 @@ func toOrderResponse(o *domain.Order) orderResponse {
 			SpecialInstructions: it.SpecialInstructions,
 		})
 	}
+	var cancellation *cancellationResponse
+	if !o.Cancellation.IsZero() {
+		cancellation = &cancellationResponse{
+			By:      string(o.Cancellation.By),
+			Reason:  string(o.Cancellation.Reason),
+			Comment: o.Cancellation.Comment,
+			At:      o.Cancellation.At,
+		}
+	}
 	return orderResponse{
 		ID:               o.ID,
 		CustomerID:       o.CustomerID,
@@ -127,6 +152,7 @@ func toOrderResponse(o *domain.Order) orderResponse {
 		DeliveryFeeCents: o.DeliveryFeeCents,
 		TipCents:         o.TipCents,
 		EstimatedMinutes: o.EstimatedMinutes,
+		Cancellation:     cancellation,
 		DropoffLat:       o.DropoffLat,
 		DropoffLng:       o.DropoffLng,
 	}

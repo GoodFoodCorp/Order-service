@@ -2,26 +2,51 @@ package application
 
 import (
 	"context"
+	"time"
 
 	zlog "github.com/rs/zerolog/log"
 
 	"goodfood/order-service/internal/domain"
 )
 
-// CancelMyOrder lets customers cancel their own order until the kitchen
-// starts preparing it. A paid order is refunded.
-func (uc *UseCases) CancelMyOrder(ctx context.Context, actor Actor, orderID string) (*domain.Order, error) {
+// CancelRequest is the reason given for a cancellation (and, for OTHER,
+// what happened).
+type CancelRequest struct {
+	Reason  string
+	Comment string
+}
+
+// CancelOrder cancels an order with a reason, like on delivery apps: the
+// customer until the kitchen starts preparing it, the restaurant (its own
+// orders) and head office until the courier has it. A paid order is
+// refunded and its stock put back.
+func (uc *UseCases) CancelOrder(ctx context.Context, actor Actor, orderID string, req CancelRequest) (*domain.Order, error) {
 	order, err := uc.orders.GetByID(ctx, orderID)
 	if err != nil {
 		return nil, err
 	}
-	if !order.IsOwnedBy(actor.UserID) {
+	var by domain.CancelledBy
+	switch {
+	case actor.HasRole(RoleAdmin):
+		by = domain.CancelledByHeadOffice
+	case actor.HasRole(RoleManager):
+		if actor.TenantID != order.RestaurantID {
+			return nil, domain.NewForbiddenError("managers can only cancel orders of their own restaurant")
+		}
+		by = domain.CancelledByRestaurant
+	case order.IsOwnedBy(actor.UserID):
+		if !order.IsCancellableByCustomer() {
+			return nil, domain.NewConflictError("the restaurant has already started this order: contact it to cancel")
+		}
+		by = domain.CancelledByCustomer
+	default:
 		return nil, domain.NewForbiddenError("you can only cancel your own orders")
 	}
-	if !order.IsCancellableByCustomer() {
-		return nil, domain.NewConflictError("the restaurant has already started this order: contact it to cancel")
+	cancellation, err := domain.NewCancellation(by, req.Reason, req.Comment, time.Now())
+	if err != nil {
+		return nil, err
 	}
-	if err := order.TransitionTo(domain.StatusCancelled); err != nil {
+	if err := order.Cancel(cancellation); err != nil {
 		return nil, err
 	}
 	return uc.cancel(ctx, order)

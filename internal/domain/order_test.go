@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -221,5 +223,20 @@ func TestNewListFilterClampsThePage(t *testing.T) {
 	}
 	if f := NewListFilter(10_000, 20, []OrderStatus{StatusConfirmed}); f.Limit != MaxPageSize || f.Offset != 20 || len(f.Statuses) != 1 {
 		t.Fatalf("got %+v", f)
+	}
+}
+
+func TestNewCancellation(t *testing.T) {
+	at := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+
+	c, err := NewCancellation(CancelledByCustomer, " wait_too_long ", "  trop long  ", at)
+	if err != nil || c.Reason != ReasonWaitTooLong || c.Comment != "trop long" || !c.At.Equal(at) {
+		t.Fatalf("got %+v, %v", c, err)
+	}
+	if _, err := NewCancellation(CancelledByCustomer, "OTHER", strings.Repeat("é", 301), at); err == nil {
+		t.Fatal("a comment over 300 characters is refused")
+	}
+	if _, err := NewCancellation("COURIER", "OTHER", "accident", at); err == nil {
+		t.Fatal("couriers do not cancel orders")
 	}
 }

@@ -143,7 +143,13 @@ func (h *OrderHandler) Confirm(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/orders/{id}/cancel  (the customer cancels their own order)
 func (h *OrderHandler) Cancel(w http.ResponseWriter, r *http.Request) {
-	order, err := h.uc.CancelMyOrder(r.Context(), actorFrom(r), chi.URLParam(r, "id"))
+	var req cancelRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, r, http.StatusBadRequest, "a cancellation reason is required")
+		return
+	}
+	order, err := h.uc.CancelOrder(r.Context(), actorFrom(r), chi.URLParam(r, "id"),
+		application.CancelRequest{Reason: req.Reason, Comment: req.Comment})
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
@@ -163,7 +169,14 @@ func (h *OrderHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, r, err)
 		return
 	}
-	order, err := h.uc.UpdateOrderStatus(r.Context(), actorFrom(r), chi.URLParam(r, "id"), target)
+	var order *domain.Order
+	if target == domain.StatusCancelled {
+		// Kept for the back-office: the same cancellation, reason included.
+		order, err = h.uc.CancelOrder(r.Context(), actorFrom(r), chi.URLParam(r, "id"),
+			application.CancelRequest{Reason: req.Reason, Comment: req.Comment})
+	} else {
+		order, err = h.uc.UpdateOrderStatus(r.Context(), actorFrom(r), chi.URLParam(r, "id"), target)
+	}
 	if err != nil {
 		writeDomainError(w, r, err)
 		return

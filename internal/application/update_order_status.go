@@ -18,6 +18,9 @@ var courierAllowedTargets = map[domain.OrderStatus]bool{
 // couriers only on the delivery-related transitions of the orders assigned to
 // them.
 func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID string, target domain.OrderStatus) (*domain.Order, error) {
+	if target == domain.StatusCancelled {
+		return nil, domain.NewValidationError("a cancellation needs a reason: use POST /api/orders/{id}/cancel")
+	}
 	order, err := uc.orders.GetByID(ctx, orderID)
 	if err != nil {
 		return nil, err
@@ -47,9 +50,6 @@ func (uc *UseCases) UpdateOrderStatus(ctx context.Context, actor Actor, orderID 
 	// The event goes to the outbox with the change itself: a status change is
 	// never committed without its event, nor an event sent for a rolled-back
 	// change.
-	if target == domain.StatusCancelled {
-		return uc.cancel(ctx, order)
-	}
 	if err := uc.orders.UpdateStatus(ctx, order, previous, domain.NewOrderEvent(order)); err != nil {
 		return nil, err
 	}

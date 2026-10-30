@@ -12,13 +12,15 @@ import (
 )
 
 // orderCols lists the order columns every read selects, in orderDest order.
-const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync, idempotency_key, fulfillment, delivery_fee_cents, tip_cents, estimated_minutes, dropoff_lat, dropoff_lng`
+const orderCols = `id, customer_id, restaurant_id, status, total_amount_cents, delivery_address, placed_at, confirmed_at, promo_code, discount_cents, stock_sync, courier_id, refund_sync, idempotency_key, fulfillment, delivery_fee_cents, tip_cents, estimated_minutes, dropoff_lat, dropoff_lng,
+	COALESCE(cancelled_by, ''), COALESCE(cancellation_reason, ''), COALESCE(cancellation_comment, ''), cancelled_at`
 
 // orderDest returns the scan destinations matching orderCols.
 func orderDest(o *domain.Order) []any {
 	return []any{&o.ID, &o.CustomerID, &o.RestaurantID, &o.Status, &o.TotalAmountCents,
 		&o.DeliveryAddress, &o.PlacedAt, &o.ConfirmedAt, &o.PromoCode, &o.DiscountCents, &o.StockSync, &o.CourierID, &o.RefundSync, &o.IdempotencyKey,
-		&o.Fulfillment, &o.DeliveryFeeCents, &o.TipCents, &o.EstimatedMinutes, &o.DropoffLat, &o.DropoffLng}
+		&o.Fulfillment, &o.DeliveryFeeCents, &o.TipCents, &o.EstimatedMinutes, &o.DropoffLat, &o.DropoffLng,
+		&o.Cancellation.By, &o.Cancellation.Reason, &o.Cancellation.Comment, &o.Cancellation.At}
 }
 
 // uniqueViolation is PostgreSQL's SQLSTATE for a unique constraint violation.
@@ -204,6 +206,8 @@ func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain
 	applied, err := r.withEvent(ctx, event, func(tx pgx.Tx) (bool, error) {
 		err := tx.QueryRow(ctx,
 			`UPDATE orders SET status = 'CANCELLED',
+			   cancelled_by = NULLIF($2, ''), cancellation_reason = NULLIF($3, ''),
+			   cancellation_comment = NULLIF($4, ''), cancelled_at = COALESCE($5, now()),
 			   stock_sync = CASE
 			     WHEN status IN ('CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
 			      AND stock_sync IN ('CONSUMED', 'CONSUME_PENDING') THEN 'RESTORE_PENDING'
@@ -213,7 +217,8 @@ func (r *OrderRepository) CancelWithStockSync(ctx context.Context, order *domain
 			     ELSE refund_sync END
 			 WHERE id = $1 AND status IN ('PLACED', 'PAYMENT_PENDING', 'CONFIRMED', 'IN_PREPARATION', 'READY_FOR_PICKUP')
 			 RETURNING stock_sync, refund_sync, confirmed_at`,
-			order.ID).Scan(&state, &order.RefundSync, &order.ConfirmedAt)
+			order.ID, string(order.Cancellation.By), string(order.Cancellation.Reason),
+			order.Cancellation.Comment, order.Cancellation.At).Scan(&state, &order.RefundSync, &order.ConfirmedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
