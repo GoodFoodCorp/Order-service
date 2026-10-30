@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -136,6 +137,35 @@ func TestStatusChangesWriteTheirEventAtomically(t *testing.T) {
 	}
 	if n := countEvents(t, repo, order.ID, "order.cancelled"); n != 1 {
 		t.Fatalf("cancelled events = %d, want 1", n)
+	}
+}
+
+func TestCancellationReasonIsStoredAndRead(t *testing.T) {
+	repo := setupRepo(t)
+	ctx := context.Background()
+	order := newStoredOrder(t, repo, domain.StatusConfirmed)
+	cancellation, err := domain.NewCancellation(domain.CancelledByRestaurant, "ITEM_UNAVAILABLE", "plus de pain", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := order.Cancel(cancellation); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CancelWithStockSync(ctx, order, domain.NewOrderEvent(order)); err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := repo.GetByID(ctx, order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Cancellation.By != domain.CancelledByRestaurant || stored.Cancellation.Reason != domain.ReasonItemUnavailable ||
+		stored.Cancellation.Comment != "plus de pain" || stored.Cancellation.At == nil {
+		t.Fatalf("cancellation = %+v", stored.Cancellation)
+	}
+	other := newStoredOrder(t, repo, domain.StatusConfirmed)
+	if read, _ := repo.GetByID(ctx, other.ID); !read.Cancellation.IsZero() {
+		t.Fatalf("a live order has no cancellation, got %+v", read.Cancellation)
 	}
 }
 

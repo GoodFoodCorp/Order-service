@@ -189,6 +189,7 @@ func (f *fakeOrderRepo) CancelWithStockSync(_ context.Context, o *domain.Order, 
 	}
 	o.RefundSync = stored.RefundSync
 	stored.Status = domain.StatusCancelled
+	stored.Cancellation = o.Cancellation
 	o.Status = domain.StatusCancelled
 	o.StockSync = stored.StockSync
 	o.ConfirmedAt = stored.ConfirmedAt
@@ -1114,7 +1115,7 @@ func TestCancellationWritesItsEvent(t *testing.T) {
 	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 
-	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	_, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"order.confirmed", "order.cancelled"}, orders.eventTypes())
@@ -1161,7 +1162,7 @@ func TestHandlePaymentSucceededIgnoresFinalRefusals(t *testing.T) {
 	order := placeTestOrder(t, uc)
 	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
-	_, err = uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+	_, err = uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
 	require.NoError(t, err)
 
 	assert.NoError(t, uc.HandlePaymentSucceeded(context.Background(), order.ID), "a cancelled order is final")
@@ -1358,7 +1359,7 @@ func TestCancelFromPaidStatusRestoresStock(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+			cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 			require.NoError(t, err)
 			assert.Equal(t, domain.StatusCancelled, cancelled.Status)
@@ -1385,7 +1386,7 @@ func TestCancelBeforePaymentNeverCallsStock(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+			cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 			require.NoError(t, err)
 			assert.Equal(t, domain.StatusCancelled, cancelled.Status)
@@ -1404,7 +1405,7 @@ func TestCancelWithConsumePendingStillCallsRestore(t *testing.T) {
 	payAndConfirm(t, uc, order.ID)
 	require.Equal(t, domain.StockSyncConsumePending, storedSync(t, orders, order.ID))
 
-	cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, domain.StockSyncRestored, cancelled.StockSync)
@@ -1420,7 +1421,7 @@ func TestCancelMarksRestorePendingWhenStockDown(t *testing.T) {
 	payAndConfirm(t, uc, order.ID)
 	stock.restoreErr = errors.New("stock-service unreachable")
 
-	cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusCancelled, cancelled.Status)
@@ -1436,7 +1437,7 @@ func TestCancelWithStateNoneDoesNotCallStock(t *testing.T) {
 	order := placeStockOrder(t, uc, burger(1))
 	payAndConfirm(t, uc, order.ID) // no recipe -> NONE
 
-	cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusCancelled, cancelled.Status)
@@ -1464,7 +1465,7 @@ func TestCancelKeepsRestorePendingWhenRestoredWriteFails(t *testing.T) {
 	require.Equal(t, domain.StockSyncConsumed, storedSync(t, orders, order.ID))
 	orders.stockSyncErr = errors.New("db down")
 
-	cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, 1, stock.restoreCalls)
@@ -1726,7 +1727,7 @@ func TestCancelBuiltFromStalePaymentPendingReadStillRestores(t *testing.T) {
 			require.NoError(t, err)
 			orders.beforeWrite = func() { payAndConfirm(t, uc, order.ID) }
 
-			cancelled, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+			cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 			require.NoError(t, err)
 			assert.Equal(t, domain.StatusCancelled, cancelled.Status)
@@ -1750,7 +1751,7 @@ func TestLateDuplicateConfirmAfterCancelDoesNotResetTheOrder(t *testing.T) {
 	require.NoError(t, err)
 	orders.beforeWrite = func() {
 		payAndConfirm(t, uc, order.ID)
-		_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+		_, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 		require.NoError(t, err)
 	}
 
@@ -1791,7 +1792,7 @@ func TestCancelConflictsWhenStatusMovedPastCancellable(t *testing.T) {
 	payAndConfirm(t, uc, order.ID)
 	orders.beforeWrite = func() { orders.orders[order.ID].Status = domain.StatusInDelivery }
 
-	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	_, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	var de *domain.Error
 	require.ErrorAs(t, err, &de)
@@ -1808,7 +1809,7 @@ func TestStatusUpdateDoesNotResurrectConcurrentlyCancelledOrder(t *testing.T) {
 	order := placeStockOrder(t, uc, burger(1))
 	payAndConfirm(t, uc, order.ID)
 	orders.beforeWrite = func() {
-		_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+		_, err := uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
 		require.NoError(t, err)
 	}
 
@@ -1921,7 +1922,7 @@ func TestCancellingAPaidOrderRefundsItAndFreesThePromo(t *testing.T) {
 	require.NoError(t, err)
 	payAndConfirm(t, uc, order.ID)
 
-	_, err = uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+	_, err = uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{order.ID}, payments.refunds)
@@ -1933,7 +1934,7 @@ func TestCancellingAnUnpaidOrderNeedsNoRefund(t *testing.T) {
 	uc, orders, payments, _ := setup()
 	order := placeTestOrder(t, uc)
 
-	_, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+	_, err := uc.CancelOrder(context.Background(), customer, order.ID, customerCancel)
 
 	require.NoError(t, err)
 	assert.Empty(t, payments.refunds)
@@ -1946,7 +1947,7 @@ func TestCancellingDuringPaymentClosesTheIntent(t *testing.T) {
 	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
 
-	_, err = uc.CancelMyOrder(context.Background(), customer, order.ID)
+	_, err = uc.CancelOrder(context.Background(), customer, order.ID, customerCancel)
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{order.ID}, payments.refunds, "payment-service closes the intent so it can never be charged")
@@ -1957,7 +1958,7 @@ func TestFailedRefundIsRetriedByTheWorker(t *testing.T) {
 	order := confirmOrder(t, uc)
 	payments.refundErr = errors.New("payment-service down")
 
-	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusCancelled)
+	_, err := uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
 	require.NoError(t, err, "the cancellation itself succeeds")
 	assert.Equal(t, domain.RefundSyncPending, storedOrder(t, orders, order.ID).RefundSync)
 
@@ -1972,7 +1973,7 @@ func TestRefundOfAnOrderWithoutPaymentIsDone(t *testing.T) {
 	order := placeTestOrder(t, uc)
 	orders.orders[order.ID].Status = domain.StatusPaymentPending // intent creation never reached payment-service
 
-	_, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+	_, err := uc.CancelOrder(context.Background(), customer, order.ID, customerCancel)
 
 	require.NoError(t, err)
 	assert.Empty(t, payments.created)
@@ -1983,20 +1984,91 @@ func TestCustomerCancellationRules(t *testing.T) {
 	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 
-	_, err := uc.CancelMyOrder(context.Background(), otherCust, order.ID)
+	_, err := uc.CancelOrder(context.Background(), otherCust, order.ID, customerCancel)
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
 
 	orders.orders[order.ID].Status = domain.StatusInPreparation
-	_, err = uc.CancelMyOrder(context.Background(), customer, order.ID)
+	_, err = uc.CancelOrder(context.Background(), customer, order.ID, customerCancel)
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeConflict, derr.Code, "too late once the kitchen started")
 
 	orders.orders[order.ID].Status = domain.StatusConfirmed
-	cancelled, err := uc.CancelMyOrder(context.Background(), customer, order.ID)
+	cancelled, err := uc.CancelOrder(context.Background(), customer, order.ID, customerCancel)
 	require.NoError(t, err)
 	assert.Equal(t, domain.StatusCancelled, cancelled.Status)
+}
+
+var (
+	customerCancel = CancelRequest{Reason: "CHANGED_MIND"}
+	staffCancel    = CancelRequest{Reason: "ITEM_UNAVAILABLE", Comment: "plus de pain"}
+	otherManager   = Actor{UserID: "mgr-2", TenantID: "resto-2", RoleSlugs: []string{RoleManager}}
+)
+
+func TestCancellationRecordsWhoAndWhy(t *testing.T) {
+	uc, orders, _, _ := setup()
+	order := confirmOrder(t, uc)
+
+	cancelled, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
+
+	require.NoError(t, err)
+	stored := storedOrder(t, orders, order.ID)
+	assert.Equal(t, domain.CancelledByRestaurant, stored.Cancellation.By)
+	assert.Equal(t, domain.ReasonItemUnavailable, stored.Cancellation.Reason)
+	assert.Equal(t, "plus de pain", cancelled.Cancellation.Comment)
+	last := orders.events[len(orders.events)-1]
+	assert.Equal(t, "order.cancelled", last.Type)
+	assert.Equal(t, "RESTAURANT", last.Data.CancelledBy)
+	assert.Equal(t, "ITEM_UNAVAILABLE", last.Data.CancellationReason)
+}
+
+func TestCancellationReasonRules(t *testing.T) {
+	cases := map[string]struct {
+		actor Actor
+		req   CancelRequest
+		code  domain.ErrorCode
+	}{
+		"no reason":                         {customer, CancelRequest{}, domain.ErrCodeValidation},
+		"restaurant reason from a customer": {customer, CancelRequest{Reason: "ITEM_UNAVAILABLE"}, domain.ErrCodeValidation},
+		"customer reason from a restaurant": {manager, CancelRequest{Reason: "CHANGED_MIND"}, domain.ErrCodeValidation},
+		"other without saying what":         {customer, CancelRequest{Reason: "OTHER"}, domain.ErrCodeValidation},
+		"another restaurant's manager":      {otherManager, staffCancel, domain.ErrCodeForbidden},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			uc, orders, _, _ := setup()
+			order := confirmOrder(t, uc)
+
+			_, err := uc.CancelOrder(context.Background(), tc.actor, order.ID, tc.req)
+
+			var derr *domain.Error
+			require.ErrorAs(t, err, &derr)
+			assert.Equal(t, tc.code, derr.Code)
+			assert.Equal(t, domain.StatusConfirmed, storedOrder(t, orders, order.ID).Status, "nothing changed")
+		})
+	}
+}
+
+func TestOtherReasonWithAnExplanationIsAccepted(t *testing.T) {
+	uc, _, _, _ := setup()
+	order := confirmOrder(t, uc)
+
+	cancelled, err := uc.CancelOrder(context.Background(), customer, order.ID, CancelRequest{Reason: "other", Comment: "Je pars en urgence"})
+
+	require.NoError(t, err)
+	assert.Equal(t, domain.ReasonOther, cancelled.Cancellation.Reason)
+}
+
+func TestStatusUpdateCannotCancelWithoutAReason(t *testing.T) {
+	uc, _, _, _ := setup()
+	order := confirmOrder(t, uc)
+
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusCancelled)
+
+	var derr *domain.Error
+	require.ErrorAs(t, err, &derr)
+	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
 }
 
 // ── Idempotent creation ─────────────────────────────────────

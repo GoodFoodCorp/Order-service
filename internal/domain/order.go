@@ -84,6 +84,8 @@ type Order struct {
 	// DropoffLat/DropoffLng locate the delivery address when it was geocoded.
 	DropoffLat *float64
 	DropoffLng *float64
+	// Cancellation says who cancelled the order and why (zero otherwise).
+	Cancellation Cancellation
 }
 
 // Fulfillment is how the order reaches the customer.
