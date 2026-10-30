@@ -96,6 +96,9 @@ func Auth(cfg JWTConfig) func(http.Handler) http.Handler {
 			if tid, ok := claims["tenant_id"].(string); ok {
 				actor.TenantID = tid
 			}
+			if email, ok := claims["email"].(string); ok {
+				actor.Email = email
+			}
 			if slugs, ok := claims["role_slugs"].([]interface{}); ok {
 				for _, s := range slugs {
 					if str, ok := s.(string); ok {

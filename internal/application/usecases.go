@@ -11,6 +11,8 @@ type Actor struct {
 	TenantID  string
 	RoleSlugs []string
 	Token     string
+	// Email is the customer's, from the access token: their invoices go there.
+	Email string
 }
 
 func (a Actor) HasRole(slug string) bool {
@@ -40,6 +42,7 @@ type UseCases struct {
 	stock    domain.StockService
 	catalog  domain.MenuCatalog
 	restos   domain.RestaurantService
+	invoices *InvoiceDeps // nil: no invoices
 }
 
 // Deps lists the ports the use cases need.

@@ -19,6 +19,11 @@ services:
       SERVICE_API_KEY: ${SERVICE_API_KEY:?SERVICE_API_KEY must be set (shared with Stock and Menu services)}
       # Broker du compose du Delivery-service (réseau partagé microservices-net)
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      # Factures : envoyées au client une fois la commande payée. En local, elles
+      # arrivent dans Mailpit (http://localhost:8025, compose du service auth).
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     depends_on:
       order-db:
         condition: service_healthy

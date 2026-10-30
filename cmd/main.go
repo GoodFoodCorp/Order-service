@@ -14,6 +14,7 @@ import (
 
 	"goodfood/order-service/internal/adapter/franchiseclient"
 	httpadapter "goodfood/order-service/internal/adapter/http"
+	"goodfood/order-service/internal/adapter/mailer"
 	"goodfood/order-service/internal/adapter/menuclient"
 	"goodfood/order-service/internal/adapter/messaging"
 	"goodfood/order-service/internal/adapter/outbox"
@@ -79,6 +80,22 @@ func main() {
 
 		Restaurants: restaurants,
 	})
+	invoices := application.InvoiceDeps{
+		Repo: postgres.NewInvoiceRepository(pool),
+		Seller: domain.Seller{Name: cfg.CompanyName, Address: cfg.CompanyAddress,
+			SIRET: cfg.CompanySIRET, VATNumber: cfg.CompanyVATNumber},
+	}
+	if cfg.FranchiseServiceURL != "" {
+		invoices.Restaurants = franchiseclient.New(cfg.FranchiseServiceURL, cfg.ServiceAPIKey, httpclient.New("franchise-service", httpclient.Settings{}))
+	}
+	if cfg.SMTPHost != "" {
+		invoices.Mailer = mailer.New(mailer.Config{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser,
+			Password: cfg.SMTPPassword, From: cfg.SMTPSender, FrontendURL: cfg.FrontendURL})
+		log.Info().Str("smtp_host", cfg.SMTPHost).Msg("invoices emailed once the order is paid")
+	} else {
+		log.Warn().Msg("SMTP_HOST not set: invoices are not emailed (still downloadable)")
+	}
+	uc.WithInvoices(invoices)
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
 	log.Info().Str("menu_service", cfg.MenuServiceURL).Str("stock_service", cfg.StockServiceURL).Msg("stock checked against stock-service using menu-service recipes")
@@ -94,6 +111,7 @@ func main() {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go runStockRetry(runCtx, log, uc, postgres.NewLocker(pool))
+	go runInvoices(runCtx, log, uc)
 
 	if cfg.RabbitMQURL != "" {
 		publisher := messaging.NewAMQPPublisher(cfg.RabbitMQURL)
@@ -180,6 +198,32 @@ func connectWithRetry(ctx context.Context, log zerolog.Logger, url string) (*pgx
 		case <-time.After(2 * time.Second):
 		case <-ctx.Done():
 			return nil, ctx.Err()
+		}
+	}
+}
+
+// invoiceInterval: an invoice reaches the customer within a few seconds of
+// the payment. Every replica runs the worker: each invoice is locked while
+// it is sent (SKIP LOCKED), so the load spreads and none is sent twice.
+const (
+	invoiceInterval = 10 * time.Second
+	invoiceBatch    = 50
+)
+
+func runInvoices(ctx context.Context, log zerolog.Logger, uc *application.UseCases) {
+	ticker := time.NewTicker(invoiceInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := uc.SendPendingInvoices(ctx, invoiceBatch)
+			if err != nil {
+				log.Warn().Err(err).Msg("invoice pass failed")
+			} else if n > 0 {
+				log.Info().Int("count", n).Msg("invoices processed")
+			}
 		}
 	}
 }

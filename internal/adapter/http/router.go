@@ -52,6 +52,7 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 			r.Get("/", handler.List)
 			r.Get("/ready-for-delivery", handler.ListReadyForDelivery)
 			r.Get("/{id}", handler.GetByID)
+			r.Get("/{id}/invoice", handler.Invoice)
 			r.Post("/{id}/payment-intent", handler.CreatePaymentIntent)
 			r.Post("/{id}/confirm", handler.Confirm)
 			r.Post("/{id}/cancel", handler.Cancel)
