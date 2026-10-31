@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,7 +72,17 @@ func (r *OrderRepository) Create(ctx context.Context, order *domain.Order) error
 	return tx.Commit(ctx)
 }
 
+// isUUID: ids come from URLs; anything else cannot be a row (and must not
+// reach PostgreSQL as a cast error).
+func isUUID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
+}
+
 func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
+	if !isUUID(id) {
+		return nil, domain.NewNotFoundError("order not found")
+	}
 	var o domain.Order
 	err := r.pool.QueryRow(ctx,
 		`SELECT `+orderCols+`

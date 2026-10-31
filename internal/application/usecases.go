@@ -42,7 +42,8 @@ type UseCases struct {
 	stock    domain.StockService
 	catalog  domain.MenuCatalog
 	restos   domain.RestaurantService
-	invoices *InvoiceDeps // nil: no invoices
+	invoices *InvoiceDeps            // nil: no invoices
+	reviews  domain.ReviewRepository // nil: no reviews
 }
 
 // Deps lists the ports the use cases need.
