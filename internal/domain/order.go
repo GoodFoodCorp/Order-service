@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -50,6 +51,15 @@ type OrderItem struct {
 	UnitPriceCents      int64
 	SpecialInstructions string
 }
+
+// Limits of one order: a typing slip or a script must not tie up a kitchen
+// (or its stock) with a thousand burgers; larger orders go through the
+// restaurant directly.
+const (
+	MaxItemQuantity       = 50
+	MaxOrderLines         = 50
+	MaxInstructionsLength = 300
+)
 
 type Order struct {
 	ID               string
@@ -156,6 +166,9 @@ func NewOrderFor(spec OrderSpec) (*Order, error) {
 	if len(items) == 0 {
 		return nil, NewValidationError("an order requires at least one item")
 	}
+	if len(items) > MaxOrderLines {
+		return nil, NewValidationError(fmt.Sprintf("an order holds at most %d different dishes", MaxOrderLines))
+	}
 
 	orderID := uuid.NewString()
 	var total int64
@@ -170,6 +183,12 @@ func NewOrderFor(spec OrderSpec) (*Order, error) {
 		}
 		if in.Quantity <= 0 {
 			return nil, NewValidationError("item quantity must be greater than zero")
+		}
+		if in.Quantity > MaxItemQuantity {
+			return nil, NewValidationError(fmt.Sprintf("at most %d of one dish per order", MaxItemQuantity))
+		}
+		if utf8.RuneCountInString(in.SpecialInstructions) > MaxInstructionsLength {
+			return nil, NewValidationError(fmt.Sprintf("special instructions are limited to %d characters", MaxInstructionsLength))
 		}
 		if in.UnitPriceCents <= 0 {
 			return nil, NewValidationError("item unit price must be greater than zero")
