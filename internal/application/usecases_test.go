@@ -679,7 +679,7 @@ func TestGetOrderAccessRules(t *testing.T) {
 		allowed bool
 	}{
 		{"owner", customer, true},
-		{"admin", admin, true},
+		{"head office (sees aggregated sales only)", admin, false},
 		{"courier not assigned to it", courier, false},
 		{"manager of the restaurant", manager, true},
 		{"manager of another restaurant", Actor{UserID: "mgr-2", TenantID: "resto-99", RoleSlugs: []string{RoleManager}}, false},
@@ -736,8 +736,10 @@ func TestListCustomerOrders(t *testing.T) {
 	_, err = uc.ListCustomerOrders(context.Background(), otherCust, customer.UserID, domain.NewListFilter(0, 0, nil))
 	require.Error(t, err)
 
-	// ...but head office can.
-	all, err := uc.ListCustomerOrders(context.Background(), admin, customer.UserID, domain.NewListFilter(0, 0, nil))
+	// ...nor can head office: an order holds the customer's identity and address.
+	_, err = uc.ListCustomerOrders(context.Background(), admin, customer.UserID, domain.NewListFilter(0, 0, nil))
+	require.Error(t, err)
+	all, err := uc.ListCustomerOrders(context.Background(), customer, "", domain.NewListFilter(0, 0, nil))
 	require.NoError(t, err)
 	assert.Len(t, all, 1)
 }
@@ -1007,7 +1009,7 @@ func TestUpdateOrderStatusInvalidTransition(t *testing.T) {
 	uc, _, _, _ := setup()
 	order := confirmOrder(t, uc)
 
-	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusDelivered)
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusDelivered)
 	var derr *domain.Error
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeInvalidTransition, derr.Code)
@@ -1023,7 +1025,7 @@ func TestUpdateOrderStatusCustomerForbidden(t *testing.T) {
 	assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
 }
 
-// ── ListReadyForDelivery ────────────────────────────────────
+// ── ListClaimableOrders ────────────────────────────────────
 
 func TestListReadyForDelivery(t *testing.T) {
 	uc, orders, _, _ := setup()
@@ -1031,18 +1033,8 @@ func TestListReadyForDelivery(t *testing.T) {
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusReadyForPickup
 
-	list, err := uc.ListReadyForDelivery(context.Background(), admin)
-	require.NoError(t, err)
-	assert.Len(t, list, 1)
-
-	// Couriers see claimable orders through delivery-service only.
-	for _, actor := range []Actor{customer, courier} {
-		_, err = uc.ListReadyForDelivery(context.Background(), actor)
-		var derr *domain.Error
-		require.ErrorAs(t, err, &derr)
-		assert.Equal(t, domain.ErrCodeForbidden, derr.Code)
-	}
-
+	// Only delivery-service lists them (internal API); couriers see them
+	// through it, without the customer's data.
 	internal, err := uc.ListClaimableOrders(context.Background())
 	require.NoError(t, err)
 	assert.Len(t, internal, 1)
@@ -1056,7 +1048,7 @@ func TestListReadyForDeliveryIncludesOrdersStillInPreparation(t *testing.T) {
 	stored := orders.orders[order.ID]
 	stored.Status = domain.StatusInPreparation
 
-	list, err := uc.ListReadyForDelivery(context.Background(), admin)
+	list, err := uc.ListClaimableOrders(context.Background())
 	require.NoError(t, err)
 	require.Len(t, list, 1)
 	assert.Equal(t, domain.StatusInPreparation, list[0].Status)
@@ -1075,7 +1067,7 @@ func TestListReadyForDeliveryExcludesOtherStatuses(t *testing.T) {
 		domain.StatusCancelled,
 	} {
 		stored.Status = s
-		list, err := uc.ListReadyForDelivery(context.Background(), admin)
+		list, err := uc.ListClaimableOrders(context.Background())
 		require.NoError(t, err)
 		assert.Empty(t, list, "status %s must not be claimable", s)
 	}
@@ -1125,7 +1117,7 @@ func TestRejectedTransitionWritesNoEvent(t *testing.T) {
 	uc, orders, _, _ := setup()
 	order := confirmOrder(t, uc)
 
-	_, err := uc.UpdateOrderStatus(context.Background(), admin, order.ID, domain.StatusDelivered)
+	_, err := uc.UpdateOrderStatus(context.Background(), manager, order.ID, domain.StatusDelivered)
 
 	require.Error(t, err)
 	assert.Equal(t, []string{"order.confirmed"}, orders.eventTypes())
@@ -1162,7 +1154,7 @@ func TestHandlePaymentSucceededIgnoresFinalRefusals(t *testing.T) {
 	order := placeTestOrder(t, uc)
 	_, err := uc.CreatePaymentIntent(context.Background(), customer, order.ID, "")
 	require.NoError(t, err)
-	_, err = uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
+	_, err = uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 	require.NoError(t, err)
 
 	assert.NoError(t, uc.HandlePaymentSucceeded(context.Background(), order.ID), "a cancelled order is final")
@@ -1809,7 +1801,7 @@ func TestStatusUpdateDoesNotResurrectConcurrentlyCancelledOrder(t *testing.T) {
 	order := placeStockOrder(t, uc, burger(1))
 	payAndConfirm(t, uc, order.ID)
 	orders.beforeWrite = func() {
-		_, err := uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
+		_, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 		require.NoError(t, err)
 	}
 
@@ -1958,7 +1950,7 @@ func TestFailedRefundIsRetriedByTheWorker(t *testing.T) {
 	order := confirmOrder(t, uc)
 	payments.refundErr = errors.New("payment-service down")
 
-	_, err := uc.CancelOrder(context.Background(), admin, order.ID, staffCancel)
+	_, err := uc.CancelOrder(context.Background(), manager, order.ID, staffCancel)
 	require.NoError(t, err, "the cancellation itself succeeds")
 	assert.Equal(t, domain.RefundSyncPending, storedOrder(t, orders, order.ID).RefundSync)
 
@@ -2250,4 +2242,36 @@ func TestTipAndFulfillmentValidation(t *testing.T) {
 	_, err = uc.PlaceOrder(context.Background(), customer, orderInput("drone", 0))
 	require.ErrorAs(t, err, &derr)
 	assert.Equal(t, domain.ErrCodeValidation, derr.Code)
+}
+
+// Head office never handles a customer's order: no reading, listing,
+// status change, cancellation, confirmation or invoice.
+func TestHeadOfficeHasNoAccessToOrders(t *testing.T) {
+	uc, _, _, _ := setup()
+	order := confirmOrder(t, uc)
+	ctx := context.Background()
+	filter := domain.NewListFilter(0, 0, nil)
+	forbidden := func(err error, what string) {
+		t.Helper()
+		var derr *domain.Error
+		require.ErrorAs(t, err, &derr, what)
+		assert.Equal(t, domain.ErrCodeForbidden, derr.Code, what)
+	}
+	_, err := uc.GetOrder(ctx, admin, order.ID)
+	forbidden(err, "read")
+	_, err = uc.ListRestaurantOrders(ctx, admin, order.RestaurantID, filter)
+	forbidden(err, "list a restaurant")
+	_, err = uc.ListCustomerOrders(ctx, admin, customer.UserID, filter)
+	forbidden(err, "list a customer")
+	_, err = uc.UpdateOrderStatus(ctx, admin, order.ID, domain.StatusInPreparation)
+	forbidden(err, "change status")
+	_, err = uc.CancelOrder(ctx, admin, order.ID, staffCancel)
+	forbidden(err, "cancel")
+	_, err = uc.ConfirmOrder(ctx, admin, order.ID)
+	forbidden(err, "confirm")
+
+	// Analytics (internal API) still gets the sales, for aggregated figures.
+	sales, err := uc.RestaurantSales(ctx, order.RestaurantID, filter)
+	require.NoError(t, err)
+	assert.Len(t, sales, 1)
 }

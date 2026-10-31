@@ -54,6 +54,15 @@ func (uc *UseCases) GetOrderForDelivery(ctx context.Context, orderID string) (*d
 	return uc.orders.GetByID(ctx, orderID)
 }
 
+// maxClaimableListed bounds the orders awaiting a courier returned at once.
+//
+// A courier can claim an order while the kitchen is still cooking it
+// (IN_PREPARATION) and spend the travel time to the restaurant instead of
+// waiting; claiming does not advance the order, which only moves to
+// IN_DELIVERY at pickup (see delivery-service). Pickups (click & collect) are
+// never offered to couriers.
+const maxClaimableListed = 500
+
 // ListClaimableOrders returns the orders awaiting a courier, for
 // delivery-service's reconciliation.
 func (uc *UseCases) ListClaimableOrders(ctx context.Context) ([]domain.Order, error) {

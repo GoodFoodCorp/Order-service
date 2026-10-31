@@ -20,7 +20,7 @@ func (uc *UseCases) ConfirmOrder(ctx context.Context, actor Actor, orderID strin
 	if err != nil {
 		return nil, err
 	}
-	if !order.IsOwnedBy(actor.UserID) && !actor.HasRole(RoleAdmin) {
+	if !order.IsOwnedBy(actor.UserID) {
 		return nil, domain.NewForbiddenError("you can only confirm your own orders")
 	}
 	return uc.confirmPaidOrder(ctx, order)
