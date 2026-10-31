@@ -1672,7 +1672,7 @@ func TestPlaceOrderCanonicalisesMenuItemIDBeforeStockCheck(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			uc, orders, _, recipes, stock := setupStock()
 			recipes.recipes[canonical] = []domain.StockLine{{StockItemID: "steak", Quantity: 1}}
-			in := domain.NewOrderItemInput{MenuItemID: form, MenuItemName: "Burger", Quantity: 100, UnitPriceCents: 1299}
+			in := domain.NewOrderItemInput{MenuItemID: form, MenuItemName: "Burger", Quantity: 40, UnitPriceCents: 1299}
 
 			order, err := uc.PlaceOrder(context.Background(), customer, stockOrderInput(in))
 
@@ -1682,7 +1682,7 @@ func TestPlaceOrderCanonicalisesMenuItemIDBeforeStockCheck(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, canonical, stored.Items[0].MenuItemID)
 			assert.Equal(t, 1, stock.checkCalls, "the recipe is found, so the stock check applies")
-			assert.Equal(t, []domain.StockLine{{StockItemID: "steak", Quantity: 100}}, stock.checkedLines)
+			assert.Equal(t, []domain.StockLine{{StockItemID: "steak", Quantity: 40}}, stock.checkedLines)
 			assert.Equal(t, []string{canonical}, recipes.lookups[0].menuItemIDs)
 		})
 	}

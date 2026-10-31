@@ -52,6 +52,24 @@ func TestNewOrder(t *testing.T) {
 			items: nil, wantErr: true,
 		},
 		{
+			name:       "fifty of one dish is the most",
+			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: MaxItemQuantity, UnitPriceCents: 100}},
+			wantErr: false, wantTotal: MaxItemQuantity * 100,
+		},
+		{
+			name:       "more than fifty of one dish",
+			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: MaxItemQuantity + 1, UnitPriceCents: 100}},
+			wantErr: true,
+		},
+		{
+			name:       "instructions too long",
+			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
+			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 1, UnitPriceCents: 100, SpecialInstructions: strings.Repeat("é", MaxInstructionsLength+1)}},
+			wantErr: true,
+		},
+		{
 			name:       "zero quantity",
 			customerID: "c1", restaurantID: "r1", deliveryAddress: "12 rue de Paris",
 			items:   []NewOrderItemInput{{MenuItemID: "11111111-1111-4111-8111-111111111111", MenuItemName: "Burger", Quantity: 0, UnitPriceCents: 100}},
