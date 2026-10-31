@@ -57,11 +57,14 @@ func NewReview(order *Order, rating int, comment string, now time.Time) (*Review
 	}, nil
 }
 
+// ErrNoReview: the order has not been reviewed (yet).
+var ErrNoReview = NewNotFoundError("this order has no review")
+
 // ReviewRepository keeps the reviews.
 type ReviewRepository interface {
 	// Create stores the review; the order already having one is a CONFLICT.
 	Create(ctx context.Context, review *Review) error
-	// ByOrder returns the order's review; none is a NOT_FOUND error.
+	// ByOrder returns the order's review; none is ErrNoReview.
 	ByOrder(ctx context.Context, orderID string) (*Review, error)
 	// ListByRestaurant returns a page of the restaurant's reviews, newest first.
 	ListByRestaurant(ctx context.Context, restaurantID string, limit, offset int) ([]Review, error)

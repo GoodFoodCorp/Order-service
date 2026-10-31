@@ -272,7 +272,7 @@ paths:
         - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
       responses:
         "200": { description: Review, content: { application/json: { schema: { $ref: "#/components/schemas/Review" } } } }
-        "404": { description: Not reviewed }
+        "204": { description: Not reviewed yet }
   /api/reviews:
     get:
       tags: [Reviews]

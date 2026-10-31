@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -68,6 +69,11 @@ func (h *OrderHandler) Review(w http.ResponseWriter, r *http.Request) {
 // GET /api/orders/{id}/review
 func (h *OrderHandler) GetReview(w http.ResponseWriter, r *http.Request) {
 	review, err := h.uc.OrderReview(r.Context(), actorFrom(r), chi.URLParam(r, "id"))
+	if errors.Is(err, domain.ErrNoReview) {
+		// Not reviewed yet: an expected answer, not an error.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
