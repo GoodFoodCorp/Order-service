@@ -19,6 +19,22 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    Review:
+      type: object
+      description: A verified review (left by the customer of a received order), shown without the customer's identity.
+      properties:
+        id: { type: string, format: uuid, description: The reviewed order }
+        rating: { type: integer, minimum: 1, maximum: 5 }
+        comment: { type: string, maxLength: 500 }
+        ordered_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    ReviewSummary:
+      type: object
+      properties:
+        restaurant_id: { type: string, format: uuid }
+        count: { type: integer }
+        average: { type: number, description: One decimal }
+        stars: { type: array, items: { type: integer }, description: "Reviews of 1 to 5 stars" }
     OrderItemInput:
       type: object
       required: [menu_item_id, menu_item_name, quantity, unit_price_cents]
@@ -229,6 +245,70 @@ paths:
           }
         "409": { description: The order was cancelled (or changed) while its payment was being confirmed }
         "502": { description: Payment not completed }
+  /api/orders/{id}/review:
+    post:
+      tags: [Reviews]
+      summary: The customer reviews their received order (once, within 30 days)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rating]
+              properties:
+                rating: { type: integer, minimum: 1, maximum: 5 }
+                comment: { type: string, maxLength: 500 }
+      responses:
+        "201": { description: Review, content: { application/json: { schema: { $ref: "#/components/schemas/Review" } } } }
+        "403": { description: Not the customer of this order }
+        "409": { description: Not delivered yet, already reviewed, or too late }
+    get:
+      tags: [Reviews]
+      summary: The order's review (customer, restaurant, head office)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Review, content: { application/json: { schema: { $ref: "#/components/schemas/Review" } } } }
+        "404": { description: Not reviewed }
+  /api/reviews:
+    get:
+      tags: [Reviews]
+      summary: A restaurant's mark and reviews, newest first (public)
+      security: []
+      parameters:
+        - { in: query, name: restaurantId, required: true, schema: { type: string, format: uuid } }
+        - { in: query, name: limit, schema: { type: integer, default: 20, maximum: 50 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0 } }
+      responses:
+        "200":
+          description: Mark and page of reviews
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - { $ref: "#/components/schemas/ReviewSummary" }
+                  - { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Review" } } } }
+  /api/reviews/summary:
+    get:
+      tags: [Reviews]
+      summary: Marks of several restaurants (public, 100 at most); restaurants without reviews are absent
+      security: []
+      parameters:
+        - { in: query, name: restaurantIds, required: true, schema: { type: string }, description: Comma-separated UUIDs }
+      responses:
+        "200": { description: Marks, content: { application/json: { schema: { type: array, items: { $ref: "#/components/schemas/ReviewSummary" } } } } }
+  /api/reviews/{id}:
+    delete:
+      tags: [Reviews]
+      summary: Head office removes an unlawful review (moderation)
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Removed }
+        "403": { description: Head office only }
   /api/orders/{id}/status:
     patch:
       tags: [Orders]

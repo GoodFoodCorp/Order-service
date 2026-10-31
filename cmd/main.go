@@ -96,6 +96,7 @@ func main() {
 		log.Warn().Msg("SMTP_HOST not set: invoices are not emailed (still downloadable)")
 	}
 	uc.WithInvoices(invoices)
+	uc.WithReviews(postgres.NewReviewRepository(pool))
 	log.Info().Str("payment_service", cfg.PaymentServiceURL).Msg("payments delegated to payment-service")
 	log.Info().Str("promo_service", cfg.PromoServiceURL).Msg("promo codes delegated to promo-service")
 	log.Info().Str("menu_service", cfg.MenuServiceURL).Str("stock_service", cfg.StockServiceURL).Msg("stock checked against stock-service using menu-service recipes")

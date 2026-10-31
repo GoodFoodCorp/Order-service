@@ -53,11 +53,20 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 			r.Get("/ready-for-delivery", handler.ListReadyForDelivery)
 			r.Get("/{id}", handler.GetByID)
 			r.Get("/{id}/invoice", handler.Invoice)
+			r.Post("/{id}/review", handler.Review)
+			r.Get("/{id}/review", handler.GetReview)
 			r.Post("/{id}/payment-intent", handler.CreatePaymentIntent)
 			r.Post("/{id}/confirm", handler.Confirm)
 			r.Post("/{id}/cancel", handler.Cancel)
 			r.Patch("/{id}/status", handler.UpdateStatus)
 		})
+	})
+
+	// Verified reviews: read by anyone, moderated by head office.
+	r.Route("/api/reviews", func(r chi.Router) {
+		r.Get("/", handler.ListReviews)
+		r.Get("/summary", handler.ReviewSummaries)
+		r.With(Auth(jwtCfg)).Delete("/{id}", handler.DeleteReview)
 	})
 
 	// Service-to-service routes for delivery-service, never exposed by the
