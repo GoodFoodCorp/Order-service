@@ -138,9 +138,23 @@ type menuEntry struct {
 // same list its customers browse, which already includes head-office (global)
 // dishes and leaves out those this restaurant has hidden.
 func (c *Client) PriceItems(ctx context.Context, restaurantID string, items []domain.OrderItem) ([]domain.OrderItem, error) {
-	menu, err := c.restaurantMenu(ctx, restaurantID)
+	menu, err := c.restaurantMenu(ctx, "/api/menu", restaurantID)
 	if err != nil {
 		return nil, err
+	}
+	// A line that is no dish may be a formule: those are only fetched then.
+	for _, item := range items {
+		if _, ok := menu[canonicalID(item.MenuItemID)]; ok {
+			continue
+		}
+		formules, err := c.restaurantMenu(ctx, "/api/menu-plans", restaurantID)
+		if err != nil {
+			return nil, err
+		}
+		for id, f := range formules {
+			menu[id] = f
+		}
+		break
 	}
 
 	priced := make([]domain.OrderItem, 0, len(items))
@@ -159,8 +173,10 @@ func (c *Client) PriceItems(ctx context.Context, restaurantID string, items []do
 	return priced, nil
 }
 
-func (c *Client) restaurantMenu(ctx context.Context, restaurantID string) (map[string]menuEntry, error) {
-	endpoint := c.baseURL + "/api/menu?restaurantId=" + url.QueryEscape(restaurantID)
+// restaurantMenu reads the restaurant's public dishes (/api/menu) or
+// formules (/api/menu-plans): both carry id, name, price and availability.
+func (c *Client) restaurantMenu(ctx context.Context, path, restaurantID string) (map[string]menuEntry, error) {
+	endpoint := c.baseURL + path + "?restaurantId=" + url.QueryEscape(restaurantID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("menu-service request: %w", err)
