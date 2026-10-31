@@ -24,7 +24,7 @@ func (f *fakeReviews) Create(_ context.Context, r *domain.Review) error {
 func (f *fakeReviews) ByOrder(_ context.Context, id string) (*domain.Review, error) {
 	r, ok := f.byOrder[id]
 	if !ok {
-		return nil, domain.NewNotFoundError("this order has no review")
+		return nil, domain.ErrNoReview
 	}
 	return &r, nil
 }

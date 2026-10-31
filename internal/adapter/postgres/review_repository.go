@@ -42,11 +42,11 @@ func (r *ReviewRepository) Create(ctx context.Context, rv *domain.Review) error 
 
 func (r *ReviewRepository) ByOrder(ctx context.Context, orderID string) (*domain.Review, error) {
 	if !isUUID(orderID) {
-		return nil, domain.NewNotFoundError("this order has no review")
+		return nil, domain.ErrNoReview
 	}
 	rv, err := scanReview(r.pool.QueryRow(ctx, `SELECT `+reviewCols+` FROM order_reviews WHERE order_id = $1`, orderID))
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, domain.NewNotFoundError("this order has no review")
+		return nil, domain.ErrNoReview
 	}
 	return rv, err
 }
@@ -95,14 +95,14 @@ func (r *ReviewRepository) Summaries(ctx context.Context, restaurantIDs []string
 
 func (r *ReviewRepository) Delete(ctx context.Context, orderID string) error {
 	if !isUUID(orderID) {
-		return domain.NewNotFoundError("this order has no review")
+		return domain.ErrNoReview
 	}
 	tag, err := r.pool.Exec(ctx, `DELETE FROM order_reviews WHERE order_id = $1`, orderID)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return domain.NewNotFoundError("this order has no review")
+		return domain.ErrNoReview
 	}
 	return nil
 }
