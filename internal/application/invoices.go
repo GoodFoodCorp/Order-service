@@ -32,8 +32,8 @@ func (uc *UseCases) recordInvoiceCustomer(ctx context.Context, actor Actor, orde
 	_ = uc.invoices.Repo.RecordCustomer(ctx, order.ID, actor.Email)
 }
 
-// GetInvoice returns the invoice of a paid order to its customer, the
-// restaurant and head office. It is numbered on first request if the worker
+// GetInvoice returns the invoice of a paid order to its customer and the
+// restaurant. It is numbered on first request if the worker
 // has not done it yet.
 func (uc *UseCases) GetInvoice(ctx context.Context, actor Actor, orderID string) (*domain.Invoice, error) {
 	if uc.invoices == nil {
@@ -44,8 +44,8 @@ func (uc *UseCases) GetInvoice(ctx context.Context, actor Actor, orderID string)
 		return nil, err
 	}
 	// The invoice names the customer: not for the courier who delivered it.
-	if !order.IsOwnedBy(actor.UserID) && !actor.HasRole(RoleAdmin) && !(actor.HasRole(RoleManager) && actor.TenantID == order.RestaurantID) {
-		return nil, domain.NewForbiddenError("only the customer, the restaurant and head office see the invoice")
+	if !order.IsOwnedBy(actor.UserID) && !(actor.HasRole(RoleManager) && actor.TenantID == order.RestaurantID) {
+		return nil, domain.NewForbiddenError("only the customer and the restaurant see the invoice")
 	}
 	if order.ConfirmedAt == nil {
 		return nil, domain.NewNotFoundError("no invoice: this order has not been paid")

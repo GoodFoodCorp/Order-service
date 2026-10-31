@@ -50,7 +50,6 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 
 			r.Post("/", handler.Create)
 			r.Get("/", handler.List)
-			r.Get("/ready-for-delivery", handler.ListReadyForDelivery)
 			r.Get("/{id}", handler.GetByID)
 			r.Get("/{id}/invoice", handler.Invoice)
 			r.Post("/{id}/review", handler.Review)
@@ -74,6 +73,9 @@ func NewRouter(handler *OrderHandler, jwtCfg JWTConfig, serviceKey string, log z
 	r.Route("/internal/orders", func(r chi.Router) {
 		r.Use(ServiceKey(serviceKey))
 		r.Get("/ready-for-delivery", handler.ListClaimableInternal)
+		// Sales for analytics-service: what head office and franchisees see
+		// aggregated, without any customer data.
+		r.Get("/sales", handler.SalesInternal)
 		r.Get("/{id}", handler.GetInternal)
 		r.Put("/{id}/courier", handler.AssignCourierInternal)
 		r.Delete("/{id}/courier/{courierId}", handler.UnassignCourierInternal)

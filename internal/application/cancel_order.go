@@ -18,7 +18,7 @@ type CancelRequest struct {
 
 // CancelOrder cancels an order with a reason, like on delivery apps: the
 // customer until the kitchen starts preparing it, the restaurant (its own
-// orders) and head office until the courier has it. A paid order is
+// orders) until the courier has it. A paid order is
 // refunded and its stock put back.
 func (uc *UseCases) CancelOrder(ctx context.Context, actor Actor, orderID string, req CancelRequest) (*domain.Order, error) {
 	order, err := uc.orders.GetByID(ctx, orderID)
@@ -27,8 +27,6 @@ func (uc *UseCases) CancelOrder(ctx context.Context, actor Actor, orderID string
 	}
 	var by domain.CancelledBy
 	switch {
-	case actor.HasRole(RoleAdmin):
-		by = domain.CancelledByHeadOffice
 	case actor.HasRole(RoleManager):
 		if actor.TenantID != order.RestaurantID {
 			return nil, domain.NewForbiddenError("managers can only cancel orders of their own restaurant")

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -185,16 +186,47 @@ func (h *OrderHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toOrderResponse(order))
 }
 
-// GET /api/orders/ready-for-delivery
-func (h *OrderHandler) ListReadyForDelivery(w http.ResponseWriter, r *http.Request) {
-	orders, err := h.uc.ListReadyForDelivery(r.Context(), actorFrom(r))
+// saleResponse is what analytics needs of an order: no customer, no address.
+type saleResponse struct {
+	ID               string             `json:"id"`
+	RestaurantID     string             `json:"restaurant_id"`
+	Status           string             `json:"status"`
+	TotalAmountCents int64              `json:"total_amount_cents"`
+	PlacedAt         time.Time          `json:"placed_at"`
+	Items            []saleItemResponse `json:"items"`
+}
+
+type saleItemResponse struct {
+	MenuItemID     string `json:"menu_item_id"`
+	MenuItemName   string `json:"menu_item_name"`
+	Quantity       int    `json:"quantity"`
+	UnitPriceCents int64  `json:"unit_price_cents"`
+}
+
+// GET /internal/orders/sales?restaurantId=&limit=&offset= (analytics-service)
+func (h *OrderHandler) SalesInternal(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	filter, err := listFilterFrom(q.Get("limit"), q.Get("offset"), q.Get("status"))
 	if err != nil {
 		writeDomainError(w, r, err)
 		return
 	}
-	out := make([]orderResponse, 0, len(orders))
-	for i := range orders {
-		out = append(out, toOrderResponse(&orders[i]))
+	orders, err := h.uc.RestaurantSales(r.Context(), q.Get("restaurantId"), filter)
+	if err != nil {
+		writeDomainError(w, r, err)
+		return
+	}
+	if len(orders) == filter.Limit {
+		w.Header().Set("X-Next-Offset", strconv.Itoa(filter.Offset+filter.Limit))
+	}
+	out := make([]saleResponse, 0, len(orders))
+	for _, o := range orders {
+		items := make([]saleItemResponse, 0, len(o.Items))
+		for _, it := range o.Items {
+			items = append(items, saleItemResponse{MenuItemID: it.MenuItemID, MenuItemName: it.MenuItemName, Quantity: it.Quantity, UnitPriceCents: it.UnitPriceCents})
+		}
+		out = append(out, saleResponse{ID: o.ID, RestaurantID: o.RestaurantID, Status: string(o.Status),
+			TotalAmountCents: o.TotalAmountCents, PlacedAt: o.PlacedAt, Items: items})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
